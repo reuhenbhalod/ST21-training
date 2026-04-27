@@ -1,15 +1,7 @@
-// ==========================================================================
-// /api/progress
-// GET  → returns all progress for the signed-in user as a map
-//        { sectionId: { read, best, passed, attemptsCount } }
-// POST → upserts one section's progress
-//        body: { sectionId, read, bestScore, passed, attemptsCount }
-// ==========================================================================
+const { verifyToken, unauthorized, jsonResponse } = require("../_lib/auth");
+const { query, sql } = require("../_lib/db");
 
-import { verifyToken, unauthorized, jsonResponse } from "../_lib/auth.js";
-import { query, sql } from "../_lib/db.js";
-
-export default async function (context, req) {
+module.exports = async function (context, req) {
   let user;
   try {
     user = await verifyToken(req);
@@ -30,7 +22,7 @@ export default async function (context, req) {
     context.log.error("Progress handler error:", err);
     return jsonResponse(context, 500, { error: "Internal server error" });
   }
-}
+};
 
 async function handleGet(context, user) {
   const result = await query(
@@ -40,7 +32,6 @@ async function handleGet(context, user) {
     { email: { type: sql.NVarChar(255), value: user.email } }
   );
 
-  // Return as an object keyed by section_id so the frontend can use it directly
   const progress = {};
   for (const row of result.recordset) {
     progress[row.section_id] = {
@@ -60,7 +51,6 @@ async function handlePost(context, user, body) {
     return jsonResponse(context, 400, { error: "sectionId is required" });
   }
 
-  // Upsert: insert or update if the row already exists
   await query(
     `MERGE user_progress AS target
        USING (SELECT @email AS email, @sectionId AS section_id) AS source

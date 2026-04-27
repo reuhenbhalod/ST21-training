@@ -1,13 +1,7 @@
-// ==========================================================================
-// POST /api/quiz-attempt
-// Logs a single quiz submission to quiz_attempts table.
-// body: { sectionId, score, passed, questions, answers }
-// ==========================================================================
+const { verifyToken, unauthorized, jsonResponse } = require("../_lib/auth");
+const { query, sql } = require("../_lib/db");
 
-import { verifyToken, unauthorized, jsonResponse } from "../_lib/auth.js";
-import { query, sql } from "../_lib/db.js";
-
-export default async function (context, req) {
+module.exports = async function (context, req) {
   let user;
   try {
     user = await verifyToken(req);
@@ -42,4 +36,4 @@ export default async function (context, req) {
     context.log.error("quiz-attempt error:", err);
     return jsonResponse(context, 500, { error: "Internal server error" });
   }
-}
+};

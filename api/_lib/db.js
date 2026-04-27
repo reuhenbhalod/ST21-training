@@ -1,12 +1,9 @@
 // ==========================================================================
 // db.js — Azure SQL Database connection pool
-// Uses Managed Identity in production (no passwords). Uses connection
-// string from environment for local dev.
 // ==========================================================================
 
-import sql from "mssql";
+const sql = require("mssql");
 
-// Connection config. The pool is created on first request and reused.
 let poolPromise = null;
 
 function getConfig() {
@@ -27,14 +24,9 @@ function getConfig() {
   };
 }
 
-/**
- * Get the shared connection pool. Creates it once on first call.
- */
-export async function getPool() {
+async function getPool() {
   if (!poolPromise) {
-    const config = getConfig();
-    poolPromise = sql.connect(config).catch((err) => {
-      // Reset on failure so the next call retries fresh
+    poolPromise = sql.connect(getConfig()).catch((err) => {
       poolPromise = null;
       throw err;
     });
@@ -42,17 +34,7 @@ export async function getPool() {
   return poolPromise;
 }
 
-/**
- * Run a parameterized query and return the result.
- *
- * Usage:
- *   const result = await query(
- *     "SELECT * FROM users WHERE email = @email",
- *     { email: { type: sql.NVarChar(255), value: "x@y.com" } }
- *   );
- *   console.log(result.recordset);  // array of rows
- */
-export async function query(text, params = {}) {
+async function query(text, params = {}) {
   const pool = await getPool();
   const request = pool.request();
   for (const [name, { type, value }] of Object.entries(params)) {
@@ -61,5 +43,4 @@ export async function query(text, params = {}) {
   return request.query(text);
 }
 
-// Re-export sql so handlers can reference sql.NVarChar, sql.Bit, etc.
-export { sql };
+module.exports = { getPool, query, sql };

@@ -1,12 +1,7 @@
-// ==========================================================================
-// GET /api/admin-user-detail?email=someone@smartek21.com
-// Admin-only. Returns one user's full progress and quiz attempt history.
-// ==========================================================================
+const { verifyToken, unauthorized, jsonResponse } = require("../_lib/auth");
+const { query, sql } = require("../_lib/db");
 
-import { verifyToken, unauthorized, jsonResponse } from "../_lib/auth.js";
-import { query, sql } from "../_lib/db.js";
-
-export default async function (context, req) {
+module.exports = async function (context, req) {
   let user;
   try {
     user = await verifyToken(req);
@@ -15,7 +10,6 @@ export default async function (context, req) {
   }
 
   try {
-    // Admin check
     const adminCheck = await query(
       `SELECT is_admin FROM users WHERE email = @email`,
       { email: { type: sql.NVarChar(255), value: user.email } }
@@ -32,7 +26,6 @@ export default async function (context, req) {
       return jsonResponse(context, 400, { error: "email query param is required" });
     }
 
-    // User record
     const userResult = await query(
       `SELECT email, first_name, last_initial, first_seen, last_seen, total_logins, is_admin
        FROM users WHERE email = @email`,
@@ -45,7 +38,6 @@ export default async function (context, req) {
 
     const u = userResult.recordset[0];
 
-    // Progress per section
     const progressResult = await query(
       `SELECT section_id, has_read, best_score, passed, attempts_count, updated_at
        FROM user_progress
@@ -54,7 +46,6 @@ export default async function (context, req) {
       { email: { type: sql.NVarChar(255), value: targetEmail } }
     );
 
-    // Last 50 quiz attempts
     const attemptsResult = await query(
       `SELECT TOP 50 id, section_id, score, passed, submitted_at
        FROM quiz_attempts
@@ -93,4 +84,4 @@ export default async function (context, req) {
     context.log.error("admin-user-detail error:", err);
     return jsonResponse(context, 500, { error: "Internal server error" });
   }
-}
+};

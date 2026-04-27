@@ -1,13 +1,7 @@
-// ==========================================================================
-// GET /api/health
-// Sanity check. Returns {ok:true, db:true} if the API and database are alive.
-// No auth required so we can ping it from anywhere to verify deployment.
-// ==========================================================================
+const { jsonResponse } = require("../_lib/auth");
+const { query } = require("../_lib/db");
 
-import { jsonResponse } from "../_lib/auth.js";
-import { query } from "../_lib/db.js";
-
-export default async function (context, req) {
+module.exports = async function (context, req) {
   try {
     await query("SELECT 1 AS ok", {});
     return jsonResponse(context, 200, { ok: true, db: true });
@@ -15,4 +9,4 @@ export default async function (context, req) {
     context.log.error("health check failed:", err);
     return jsonResponse(context, 500, { ok: false, db: false, error: err.message });
   }
-}
+};

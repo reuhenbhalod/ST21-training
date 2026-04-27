@@ -1,14 +1,7 @@
-// ==========================================================================
-// GET /api/admin-users
-// Admin-only. Returns a list of all users with summary stats:
-//   email, name, last_seen, first_seen, total_logins,
-//   modules_completed (passed count), avg_best_score
-// ==========================================================================
+const { verifyToken, unauthorized, jsonResponse } = require("../_lib/auth");
+const { query, sql } = require("../_lib/db");
 
-import { verifyToken, unauthorized, jsonResponse } from "../_lib/auth.js";
-import { query, sql } from "../_lib/db.js";
-
-export default async function (context, req) {
+module.exports = async function (context, req) {
   let user;
   try {
     user = await verifyToken(req);
@@ -17,7 +10,6 @@ export default async function (context, req) {
   }
 
   try {
-    // Server-side admin check. Don't trust the client.
     const adminCheck = await query(
       `SELECT is_admin FROM users WHERE email = @email`,
       { email: { type: sql.NVarChar(255), value: user.email } }
@@ -29,7 +21,6 @@ export default async function (context, req) {
       return jsonResponse(context, 403, { error: "Admin access required" });
     }
 
-    // Pull every user with their progress aggregates
     const result = await query(
       `SELECT
          u.email,
@@ -74,4 +65,4 @@ export default async function (context, req) {
     context.log.error("admin-users error:", err);
     return jsonResponse(context, 500, { error: "Internal server error" });
   }
-}
+};

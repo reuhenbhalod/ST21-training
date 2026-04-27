@@ -1,16 +1,7 @@
-// ==========================================================================
-// POST /api/heartbeat
-// Called when a user signs in or periodically during a session.
-// - Creates the user record if it doesn't exist
-// - Updates last_seen timestamp
-// - Increments total_logins on first contact each session
-// body: { isNewSession: boolean }
-// ==========================================================================
+const { verifyToken, unauthorized, jsonResponse } = require("../_lib/auth");
+const { query, sql } = require("../_lib/db");
 
-import { verifyToken, unauthorized, jsonResponse } from "../_lib/auth.js";
-import { query, sql } from "../_lib/db.js";
-
-export default async function (context, req) {
+module.exports = async function (context, req) {
   let user;
   try {
     user = await verifyToken(req);
@@ -21,7 +12,6 @@ export default async function (context, req) {
   try {
     const isNewSession = !!(req.body && req.body.isNewSession);
 
-    // Upsert the user record. Increment logins only on new sessions.
     await query(
       `MERGE users AS target
          USING (SELECT @email AS email) AS source
@@ -45,8 +35,6 @@ export default async function (context, req) {
       }
     );
 
-    // Also tell the client whether this user is an admin so the UI can show
-    // the "Switch to admin view" button.
     const result = await query(
       `SELECT is_admin FROM users WHERE email = @email`,
       { email: { type: sql.NVarChar(255), value: user.email } }
@@ -58,4 +46,4 @@ export default async function (context, req) {
     context.log.error("heartbeat error:", err);
     return jsonResponse(context, 500, { error: "Internal server error" });
   }
-}
+};
