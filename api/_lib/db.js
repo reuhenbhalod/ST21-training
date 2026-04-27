@@ -10,23 +10,14 @@ import sql from "mssql";
 let poolPromise = null;
 
 function getConfig() {
-  // In Azure Static Web Apps, the API picks up env vars set in the portal.
-  // Required env vars:
-  //   SQL_SERVER     e.g., smartek21-academy-sql.database.windows.net
-  //   SQL_DATABASE   e.g., smartek21-academy-db
-  //
-  // Authentication uses the Managed Identity attached to the Static Web App.
-  // No password needed.
-
   return {
     server: process.env.SQL_SERVER,
     database: process.env.SQL_DATABASE,
+    user: process.env.SQL_USER,
+    password: process.env.SQL_PASSWORD,
     options: {
       encrypt: true,
       trustServerCertificate: false,
-    },
-    authentication: {
-      type: "azure-active-directory-msi-app-service",
     },
     pool: {
       max: 10,
