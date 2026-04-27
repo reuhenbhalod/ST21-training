@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import { PublicClientApplication } from "@azure/msal-browser";
 import {
   Lock, Mail, LogOut, BookOpen, ClipboardCheck,
@@ -54,6 +54,14 @@ const MSAL_CONFIG = {
   tenantId: "4738192e-2424-46c8-a19c-bc2c86665215",
   domain: "smartek21.com"
 };
+
+// Scopes we ask Microsoft for. User.Read is the basic profile permission.
+// We use the resulting access token to call our own API endpoints.
+const MSAL_SCOPES = ["User.Read"];
+
+// Base URL for API calls. Empty string means "same origin" — works in
+// Azure Static Web Apps where the API lives at /api on the same domain.
+const API_BASE = "";
 
 // Create the MSAL instance once at module load time, AFTER MSAL_CONFIG is defined.
 // This is what actually talks to Microsoft's login servers.
@@ -2745,16 +2753,163 @@ const COURSE = [
 export default function SmarTek21Academy() {
   const [authState, setAuthState] = useState("login"); // login | authed
   const [user, setUser] = useState(null);
+  const [accessToken, setAccessToken] = useState(null); // Microsoft token for API calls
+  const [isAdmin, setIsAdmin] = useState(false);
 
-  const [view, setView] = useState("dashboard"); // dashboard | reading | quiz
+  const [view, setView] = useState("dashboard"); // dashboard | reading | quiz | admin
   const [activeSectionId, setActiveSectionId] = useState(null);
   const [progress, setProgress] = useState({});
   const [quizState, setQuizState] = useState({ questions: [], answers: {}, submitted: false });
 
+  // API state
+  const [progressLoading, setProgressLoading] = useState(false);
+  const [apiError, setApiError] = useState(null);
   const activeSection = useMemo(
     () => COURSE.find(s => s.id === activeSectionId),
     [activeSectionId]
   );
+
+  // ----------------------------------------------------------------------
+  // API HELPER
+  // Calls our backend /api/* endpoints. Adds the Authorization header.
+  // Re-acquires the token silently if the cached one expired.
+  // ----------------------------------------------------------------------
+
+  const getFreshToken = useCallback(async () => {
+    // Try cached token first; if it works, return it
+    if (accessToken) return accessToken;
+    // Otherwise acquire silently using the MSAL session
+    const accounts = msalInstance.getAllAccounts();
+    if (accounts.length === 0) return null;
+    try {
+      const result = await msalInstance.acquireTokenSilent({
+        scopes: MSAL_SCOPES,
+        account: accounts[0]
+      });
+      setAccessToken(result.accessToken);
+      return result.accessToken;
+    } catch (err) {
+      console.warn("acquireTokenSilent failed:", err);
+      return null;
+    }
+  }, [accessToken]);
+
+  const apiCall = useCallback(async (path, options = {}) => {
+    const token = await getFreshToken();
+    if (!token) throw new Error("No access token available");
+    const res = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+        ...(options.headers || {})
+      }
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`API ${res.status}: ${text || res.statusText}`);
+    }
+    return res.json();
+  }, [getFreshToken]);
+
+  // ----------------------------------------------------------------------
+  // EFFECTS: load progress on login, fire heartbeat once on login
+  // ----------------------------------------------------------------------
+
+  // Heartbeat once on login: marks user as seen, gets isAdmin flag
+  useEffect(() => {
+    if (!user?.email || !accessToken) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await apiCall("/api/heartbeat", {
+          method: "POST",
+          body: JSON.stringify({ isNewSession: true })
+        });
+        if (!cancelled) {
+          setIsAdmin(!!data.isAdmin);
+        }
+      } catch (err) {
+        console.warn("Heartbeat failed:", err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [user?.email, accessToken, apiCall]);
+
+  // Load progress from the database on login
+  useEffect(() => {
+    if (!user?.email || !accessToken) return;
+    let cancelled = false;
+    (async () => {
+      setProgressLoading(true);
+      setApiError(null);
+      try {
+        const data = await apiCall("/api/progress");
+        if (!cancelled) {
+          setProgress(data.progress || {});
+        }
+      } catch (err) {
+        console.error("Failed to load progress:", err);
+        if (!cancelled) {
+          setApiError("Could not load your progress. Please refresh.");
+        }
+      } finally {
+        if (!cancelled) setProgressLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [user?.email, accessToken, apiCall]);
+
+  // ----------------------------------------------------------------------
+  // SAVE HELPERS — called from quiz submit and reading-marked
+  // ----------------------------------------------------------------------
+
+  const saveProgress = useCallback(async (sectionId, patch) => {
+    // Optimistic local update first so the UI feels instant
+    setProgress(prev => {
+      const cur = prev[sectionId] || { read: false, best: 0, passed: false, attemptsCount: 0 };
+      const next = { ...cur, ...patch };
+      // Best score should never go down
+      if (typeof patch.best === "number") {
+        next.best = Math.max(cur.best || 0, patch.best);
+      }
+      next.passed = cur.passed || !!patch.passed;
+      return { ...prev, [sectionId]: next };
+    });
+    // Then persist to the server
+    try {
+      // We need the merged value to send, so re-read it from the closure of the latest state
+      // Easier: reconstruct what we just stored
+      setProgress(currentSnapshot => {
+        const merged = currentSnapshot[sectionId] || {};
+        // Fire and forget the API call. Errors are logged but don't block UI.
+        apiCall("/api/progress", {
+          method: "POST",
+          body: JSON.stringify({
+            sectionId,
+            read: !!merged.read,
+            bestScore: merged.best || 0,
+            passed: !!merged.passed,
+            attemptsCount: merged.attemptsCount || 0
+          })
+        }).catch(err => console.warn("saveProgress failed:", err));
+        return currentSnapshot; // no state change here, just used for the read
+      });
+    } catch (err) {
+      console.warn("saveProgress error:", err);
+    }
+  }, [apiCall]);
+
+  const logQuizAttempt = useCallback(async (sectionId, score, passed, questions, answers) => {
+    try {
+      await apiCall("/api/quiz-attempt", {
+        method: "POST",
+        body: JSON.stringify({ sectionId, score, passed, questions, answers })
+      });
+    } catch (err) {
+      console.warn("logQuizAttempt failed:", err);
+    }
+  }, [apiCall]);
 
   const completedCount = Object.values(progress).filter(p => p.passed).length;
   const totalCount = COURSE.length;
@@ -2762,7 +2917,7 @@ export default function SmarTek21Academy() {
 
   // --- AUTH HANDLERS ----------------------------------------------------
 
-  function attemptLogin(rawEmail) {
+  function attemptLogin(rawEmail, token) {
     const email = rawEmail.trim().toLowerCase();
     if (!email) return { error: "Enter your work email to continue." };
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -2771,28 +2926,29 @@ export default function SmarTek21Academy() {
     if (!email.endsWith(`@${MSAL_CONFIG.domain}`)) {
       return { error: `Use your @${MSAL_CONFIG.domain} Microsoft work account to sign in.` };
     }
-    // Any authenticated user from the SmarTek21 tenant can access the course.
-    // In production, Microsoft Entra ID has already verified this is a real
-    // SmarTek21 employee by the time we reach this function.
     setUser({ email, ...parseEmail(email) });
+    setAccessToken(token || null);
     setAuthState("authed");
     return { error: null };
   }
 
   function handleLogout() {
-  const accounts = msalInstance.getAllAccounts();
-  if (accounts.length > 0) {
-    msalInstance.logoutRedirect({
-      postLogoutRedirectUri: window.location.origin
-    }).catch(err => console.warn("MSAL logout error:", err));
+    const accounts = msalInstance.getAllAccounts();
+    if (accounts.length > 0) {
+      msalInstance.logoutRedirect({
+        postLogoutRedirectUri: window.location.origin
+      }).catch(err => console.warn("MSAL logout error:", err));
+    }
+    // Clear user FIRST so any save effect skips writing on logout
+    setUser(null);
+    setAccessToken(null);
+    setIsAdmin(false);
+    setAuthState("login");
+    setView("dashboard");
+    setActiveSectionId(null);
+    setProgress({});
+    setQuizState({ questions: [], answers: {}, submitted: false });
   }
-  setAuthState("login");
-  setUser(null);
-  setView("dashboard");
-  setActiveSectionId(null);
-  setProgress({});
-  setQuizState({ questions: [], answers: {}, submitted: false });
-}
 
   // --- NAVIGATION HANDLERS ---------------------------------------------
 
@@ -2824,7 +2980,7 @@ export default function SmarTek21Academy() {
     scrollToTop();
   }
   function markRead(sectionId) {
-    setProgress(p => ({ ...p, [sectionId]: { ...(p[sectionId] || {}), read: true } }));
+    saveProgress(sectionId, { read: true });
   }
   function submitQuiz() {
     const questions = quizState.questions;
@@ -2832,18 +2988,21 @@ export default function SmarTek21Academy() {
     const correct = questions.reduce((acc, q, i) => acc + (quizState.answers[i] === q.correct ? 1 : 0), 0);
     const score = correct / total;
     const passed = score >= PASS_THRESHOLD;
-    setProgress(p => {
-      const prev = p[activeSectionId] || {};
-      const best = Math.max(prev.best || 0, score);
-      return {
-        ...p,
-        [activeSectionId]: { ...prev, read: true, best, passed: prev.passed || passed }
-      };
+
+    const currentAttempts = (progress[activeSectionId]?.attemptsCount || 0) + 1;
+
+    // Optimistic local update + persist to server
+    saveProgress(activeSectionId, {
+      read: true,
+      best: score,
+      passed,
+      attemptsCount: currentAttempts
     });
-    // Stay on the quiz view; Quiz component renders the submitted state inline
-    // with the percentage banner at the top and green/red highlighting on answers.
+
+    // Log the attempt to history (fire and forget)
+    logQuizAttempt(activeSectionId, score, passed, questions, quizState.answers);
+
     setQuizState(q => ({ ...q, submitted: true }));
-    // Scroll to top so the user sees the percentage banner first
     if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -2853,9 +3012,31 @@ export default function SmarTek21Academy() {
 
   return (
     <div className="min-h-screen bg-[#FAFAFA] text-[#1A1A1A]" style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, sans-serif" }}>
-      <TopNav user={user} onLogout={handleLogout} onHome={() => { setView("dashboard"); setActiveSectionId(null); scrollToTop(); }} overallPercent={overallPercent} />
+      <TopNav
+        user={user}
+        onLogout={handleLogout}
+        onHome={() => { setView("dashboard"); setActiveSectionId(null); scrollToTop(); }}
+        overallPercent={overallPercent}
+        isAdmin={isAdmin}
+        isAdminView={view === "admin"}
+        onToggleAdmin={() => {
+          if (view === "admin") {
+            setView("dashboard");
+          } else {
+            setView("admin");
+          }
+          scrollToTop();
+        }}
+      />
 
-      {view === "dashboard" && (
+      {view === "dashboard" && progressLoading && (
+        <div className="max-w-3xl mx-auto px-6 py-24 text-center">
+          <div className="text-sm uppercase tracking-[0.2em] text-[#E66433] font-bold mb-2">Loading</div>
+          <div className="text-lg text-[#4A4A4A]">Pulling your progress from the server...</div>
+        </div>
+      )}
+
+      {view === "dashboard" && !progressLoading && (
         <Dashboard
           progress={progress}
           overallPercent={overallPercent}
@@ -2863,6 +3044,9 @@ export default function SmarTek21Academy() {
           totalCount={totalCount}
           onOpen={openReading}
           user={user}
+          isAdmin={isAdmin}
+          onOpenAdmin={() => setView("admin")}
+          apiError={apiError}
         />
       )}
 
@@ -2890,6 +3074,20 @@ export default function SmarTek21Academy() {
             else { setView("dashboard"); setActiveSectionId(null); scrollToTop(); }
           }}
         />
+      )}
+
+      {view === "admin" && isAdmin && (
+        <AdminView
+          apiCall={apiCall}
+          onBack={() => { setView("dashboard"); scrollToTop(); }}
+        />
+      )}
+
+      {view === "admin" && !isAdmin && (
+        <div className="max-w-3xl mx-auto px-6 py-24 text-center">
+          <div className="text-sm uppercase tracking-[0.2em] text-red-700 font-bold mb-2">Forbidden</div>
+          <div className="text-lg text-[#4A4A4A]">You do not have admin access.</div>
+        </div>
       )}
 
       <Footer />
@@ -2930,24 +3128,25 @@ function Login({ onAttempt }) {
 // On page load, check if we are returning from a Microsoft redirect.
 // This runs once when the Login component mounts.
 useEffect(() => {
-  (async () => {
-    try {
-      await msalReady;
-      const response = await msalInstance.handleRedirectPromise();
-      if (response && response.account) {
-        const signedInEmail = (response.account.username || "").toLowerCase();
-        if (!signedInEmail.endsWith(`@${MSAL_CONFIG.domain}`)) {
-          setError(`Use your @${MSAL_CONFIG.domain} Microsoft work account to sign in.`);
-          return;
+    (async () => {
+      try {
+        await msalReady;
+        const response = await msalInstance.handleRedirectPromise();
+        if (response && response.account) {
+          const signedInEmail = (response.account.username || "").toLowerCase();
+          if (!signedInEmail.endsWith(`@${MSAL_CONFIG.domain}`)) {
+            setError(`Use your @${MSAL_CONFIG.domain} Microsoft work account to sign in.`);
+            return;
+          }
+          // Pass the access token up so the parent can call our API
+          onAttempt(signedInEmail, response.accessToken);
         }
-        onAttempt(signedInEmail);
+      } catch (err) {
+        console.error("MSAL redirect error:", err);
+        setError("Sign-in failed. Please try again.");
       }
-    } catch (err) {
-      console.error("MSAL redirect error:", err);
-      setError("Sign-in failed. Please try again.");
-    }
-  })();
-}, []);
+    })();
+  }, []);
 
   // The simulated dialog's Next button is no longer used, but we keep the
   // handler so the dialog code doesn't break if it stays in the tree.
@@ -3078,7 +3277,7 @@ function MicrosoftLogo({ large = false }) {
 // TOP NAV
 // ===========================================================================
 
-function TopNav({ user, onLogout, onHome, overallPercent }) {
+function TopNav({ user, onLogout, onHome, overallPercent, isAdmin, isAdminView, onToggleAdmin }) {
   return (
     <header className="sticky top-0 z-40 bg-white border-b border-[#E5E5E5]">
       <div className="max-w-6xl mx-auto px-6 py-3 flex items-center justify-between">
@@ -3100,6 +3299,35 @@ function TopNav({ user, onLogout, onHome, overallPercent }) {
         </div>
 
         <div className="flex items-center gap-3">
+          {isAdmin && (
+            <button
+              onClick={onToggleAdmin}
+              style={{
+                padding: "0.5rem 0.875rem",
+                borderRadius: "0.375rem",
+                fontSize: "0.8125rem",
+                fontWeight: 600,
+                border: `1px solid ${isAdminView ? "#E66433" : "#E5E5E5"}`,
+                backgroundColor: isAdminView ? "#FDF1EC" : "#FFFFFF",
+                color: isAdminView ? "#E66433" : "#4A4A4A",
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+                transition: "all 0.15s ease"
+              }}
+              onMouseEnter={e => {
+                if (isAdminView) return;
+                e.currentTarget.style.borderColor = "#E66433";
+                e.currentTarget.style.color = "#E66433";
+              }}
+              onMouseLeave={e => {
+                if (isAdminView) return;
+                e.currentTarget.style.borderColor = "#E5E5E5";
+                e.currentTarget.style.color = "#4A4A4A";
+              }}
+            >
+              {isAdminView ? "← Back to learner view" : "Switch to admin view"}
+            </button>
+          )}
           <div className="hidden sm:block text-right">
             <div className="text-sm font-semibold text-[#1A1A1A] leading-tight">{user.displayName}</div>
           </div>
@@ -3888,4 +4116,355 @@ function Footer() {
       </div>
     </footer>
   );
+}
+
+// ===========================================================================
+// ADMIN VIEW
+// Two states: list of all users, or detail view for one user.
+// ===========================================================================
+
+function AdminView({ apiCall, onBack }) {
+  const [view, setView] = useState("list"); // list | detail
+  const [selectedEmail, setSelectedEmail] = useState(null);
+
+  if (view === "detail" && selectedEmail) {
+    return (
+      <AdminUserDetail
+        email={selectedEmail}
+        apiCall={apiCall}
+        onBack={() => { setView("list"); setSelectedEmail(null); }}
+      />
+    );
+  }
+
+  return (
+    <AdminUserList
+      apiCall={apiCall}
+      onBack={onBack}
+      onSelectUser={(email) => { setSelectedEmail(email); setView("detail"); }}
+    />
+  );
+}
+
+function AdminUserList({ apiCall, onBack, onSelectUser }) {
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const data = await apiCall("/api/admin-users");
+        if (!cancelled) setUsers(data.users || []);
+      } catch (err) {
+        console.error("admin-users fetch failed:", err);
+        if (!cancelled) setError(err.message || "Failed to load users");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [apiCall]);
+
+  return (
+    <div className="max-w-6xl mx-auto px-6 py-12">
+      <div className="mb-10">
+        <div className="flex items-center gap-2 mb-3">
+          <div className="w-1 h-4 bg-[#E66433]" />
+          <div className="text-xs uppercase tracking-[0.25em] text-[#E66433] font-semibold">Admin</div>
+        </div>
+        <h1 className="text-4xl font-bold text-[#1A1A1A] mb-2 tracking-tight">User progress</h1>
+        <p className="text-[#4A4A4A]">All users who have signed in to the Sales Academy. Click a row to see their full progress and quiz history.</p>
+      </div>
+
+      {loading && (
+        <div className="text-center py-16 text-[#4A4A4A]">Loading users…</div>
+      )}
+
+      {error && (
+        <div className="p-4 rounded-md bg-red-50 border border-red-200 text-sm text-red-900">
+          <strong>Error:</strong> {error}
+        </div>
+      )}
+
+      {!loading && !error && users.length === 0 && (
+        <div className="text-center py-16 text-[#767676]">No users yet. Once people sign in, they will appear here.</div>
+      )}
+
+      {!loading && !error && users.length > 0 && (
+        <div className="bg-white border border-[#E5E5E5] rounded-lg overflow-hidden">
+          <table className="w-full">
+            <thead style={{ backgroundColor: "#FAFAFA", borderBottom: "1px solid #E5E5E5" }}>
+              <tr>
+                <Th>User</Th>
+                <Th>Modules passed</Th>
+                <Th>Avg score</Th>
+                <Th>Logins</Th>
+                <Th>Last seen</Th>
+                <Th>{""}</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {users.map((u) => (
+                <tr
+                  key={u.email}
+                  onClick={() => onSelectUser(u.email)}
+                  style={{ borderBottom: "1px solid #F3F3F3", cursor: "pointer", transition: "background-color 0.1s" }}
+                  onMouseEnter={e => e.currentTarget.style.backgroundColor = "#FDF1EC"}
+                  onMouseLeave={e => e.currentTarget.style.backgroundColor = "transparent"}
+                >
+                  <Td>
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-[#E66433] flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
+                        {((u.firstName?.charAt(0) || "") + (u.lastInitial || "")).toUpperCase()}
+                      </div>
+                      <div>
+                        <div className="font-semibold text-[#1A1A1A]">
+                          {u.firstName ? `${u.firstName} ${u.lastInitial || ""}.` : u.email}
+                          {u.isAdmin && <span style={{ marginLeft: "0.5rem", fontSize: "0.65rem", padding: "0.125rem 0.375rem", borderRadius: "0.25rem", backgroundColor: "#FDF1EC", color: "#E66433", fontWeight: 700, letterSpacing: "0.05em" }}>ADMIN</span>}
+                        </div>
+                        <div className="text-xs text-[#767676]">{u.email}</div>
+                      </div>
+                    </div>
+                  </Td>
+                  <Td>
+                    <span className="font-semibold text-[#1A1A1A]">{u.modulesPassed}</span>
+                    <span className="text-[#767676]"> / {COURSE.length}</span>
+                  </Td>
+                  <Td>
+                    {u.modulesStarted > 0
+                      ? <span className="tabular-nums">{Math.round(u.avgBestScore * 100)}%</span>
+                      : <span className="text-[#767676]">—</span>}
+                  </Td>
+                  <Td>
+                    <span className="tabular-nums text-[#1A1A1A]">{u.totalLogins}</span>
+                  </Td>
+                  <Td>
+                    <span className="text-sm text-[#4A4A4A]">{formatRelativeDate(u.lastSeen)}</span>
+                  </Td>
+                  <Td>
+                    <ChevronRight className="w-4 h-4 text-[#767676]" />
+                  </Td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="mt-6 text-xs text-[#767676]">
+        Showing {users.length} {users.length === 1 ? "user" : "users"} · refresh the page to update
+      </div>
+    </div>
+  );
+}
+
+function AdminUserDetail({ email, apiCall, onBack }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const result = await apiCall(`/api/admin-user-detail?email=${encodeURIComponent(email)}`);
+        if (!cancelled) setData(result);
+      } catch (err) {
+        console.error("admin-user-detail fetch failed:", err);
+        if (!cancelled) setError(err.message || "Failed to load user");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [email, apiCall]);
+
+  if (loading) {
+    return <div className="max-w-4xl mx-auto px-6 py-24 text-center text-[#4A4A4A]">Loading…</div>;
+  }
+  if (error) {
+    return (
+      <div className="max-w-4xl mx-auto px-6 py-12">
+        <button onClick={onBack} className="text-sm text-[#4A4A4A] hover:text-[#E66433] flex items-center gap-1.5 mb-6">
+          <ArrowLeft className="w-4 h-4" /> Back to user list
+        </button>
+        <div className="p-4 rounded-md bg-red-50 border border-red-200 text-sm text-red-900">
+          <strong>Error:</strong> {error}
+        </div>
+      </div>
+    );
+  }
+  if (!data) return null;
+
+  const { user: u, progress, attempts } = data;
+  const passedCount = progress.filter(p => p.passed).length;
+  const startedCount = progress.length;
+
+  return (
+    <div className="max-w-4xl mx-auto px-6 py-12">
+      <button onClick={onBack} className="text-sm text-[#4A4A4A] hover:text-[#E66433] flex items-center gap-1.5 mb-6 transition">
+        <ArrowLeft className="w-4 h-4" /> Back to user list
+      </button>
+
+      <div className="bg-white border border-[#E5E5E5] rounded-lg p-6 mb-6">
+        <div className="flex items-center gap-4 mb-4">
+          <div className="w-14 h-14 rounded-full bg-[#E66433] flex items-center justify-center text-white text-lg font-bold flex-shrink-0">
+            {((u.firstName?.charAt(0) || "") + (u.lastInitial || "")).toUpperCase()}
+          </div>
+          <div className="flex-1">
+            <div className="flex items-center gap-2">
+              <h1 className="text-2xl font-bold text-[#1A1A1A]">
+                {u.firstName ? `${u.firstName} ${u.lastInitial || ""}.` : u.email}
+              </h1>
+              {u.isAdmin && (
+                <span style={{ fontSize: "0.7rem", padding: "0.125rem 0.5rem", borderRadius: "0.25rem", backgroundColor: "#FDF1EC", color: "#E66433", fontWeight: 700, letterSpacing: "0.05em" }}>ADMIN</span>
+              )}
+            </div>
+            <div className="text-sm text-[#767676]">{u.email}</div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-4 pt-4 border-t border-[#F3F3F3]">
+          <Stat label="Modules passed" value={`${passedCount} / ${COURSE.length}`} />
+          <Stat label="Modules started" value={startedCount} />
+          <Stat label="Total logins" value={u.totalLogins} />
+          <Stat label="Last seen" value={formatRelativeDate(u.lastSeen)} />
+        </div>
+      </div>
+
+      {/* Progress per section */}
+      <h2 className="text-lg font-bold text-[#1A1A1A] mb-3 mt-8">Module progress</h2>
+      <div className="bg-white border border-[#E5E5E5] rounded-lg overflow-hidden mb-8">
+        {COURSE.map((section, idx) => {
+          const p = progress.find(x => x.sectionId === section.id);
+          const last = idx === COURSE.length - 1;
+          return (
+            <div
+              key={section.id}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "1rem",
+                padding: "0.875rem 1.25rem",
+                borderBottom: last ? "none" : "1px solid #F3F3F3"
+              }}
+            >
+              <div className="text-xs font-bold tabular-nums text-[#767676] w-6">{section.number}</div>
+              <div className="flex-1 text-sm font-medium text-[#1A1A1A]">{section.title}</div>
+              {!p && <span className="text-xs text-[#767676]">Not started</span>}
+              {p && p.passed && (
+                <span style={{ fontSize: "0.75rem", padding: "0.125rem 0.5rem", borderRadius: "0.25rem", backgroundColor: "#DCFCE7", color: "#166534", fontWeight: 600 }}>
+                  Passed · {Math.round(p.bestScore * 100)}%
+                </span>
+              )}
+              {p && !p.passed && p.attemptsCount > 0 && (
+                <span style={{ fontSize: "0.75rem", padding: "0.125rem 0.5rem", borderRadius: "0.25rem", backgroundColor: "#FEE2E2", color: "#991B1B", fontWeight: 600 }}>
+                  Failed · best {Math.round(p.bestScore * 100)}% · {p.attemptsCount} attempts
+                </span>
+              )}
+              {p && !p.passed && p.attemptsCount === 0 && p.read && (
+                <span className="text-xs text-[#767676]">Read, not yet quizzed</span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Quiz attempt history */}
+      <h2 className="text-lg font-bold text-[#1A1A1A] mb-3">Quiz attempts (last 50)</h2>
+      {attempts.length === 0 && (
+        <div className="bg-white border border-[#E5E5E5] rounded-lg p-6 text-center text-sm text-[#767676]">
+          No quiz attempts yet.
+        </div>
+      )}
+      {attempts.length > 0 && (
+        <div className="bg-white border border-[#E5E5E5] rounded-lg overflow-hidden">
+          <table className="w-full">
+            <thead style={{ backgroundColor: "#FAFAFA", borderBottom: "1px solid #E5E5E5" }}>
+              <tr>
+                <Th>Module</Th>
+                <Th>Score</Th>
+                <Th>Result</Th>
+                <Th>When</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {attempts.map((a) => {
+                const section = COURSE.find(s => s.id === a.sectionId);
+                return (
+                  <tr key={a.id} style={{ borderBottom: "1px solid #F3F3F3" }}>
+                    <Td>
+                      <div className="text-xs text-[#767676]">{section?.number || "?"}</div>
+                      <div className="text-sm font-medium text-[#1A1A1A]">{section?.title || a.sectionId}</div>
+                    </Td>
+                    <Td>
+                      <span className="tabular-nums font-semibold">{Math.round(a.score * 100)}%</span>
+                    </Td>
+                    <Td>
+                      {a.passed
+                        ? <span style={{ fontSize: "0.75rem", padding: "0.125rem 0.5rem", borderRadius: "0.25rem", backgroundColor: "#DCFCE7", color: "#166534", fontWeight: 600 }}>PASS</span>
+                        : <span style={{ fontSize: "0.75rem", padding: "0.125rem 0.5rem", borderRadius: "0.25rem", backgroundColor: "#FEE2E2", color: "#991B1B", fontWeight: 600 }}>FAIL</span>}
+                    </Td>
+                    <Td>
+                      <span className="text-sm text-[#4A4A4A]">{formatRelativeDate(a.submittedAt)}</span>
+                    </Td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Tiny helper components used in the admin tables
+function Th({ children }) {
+  return (
+    <th style={{ textAlign: "left", padding: "0.75rem 1.25rem", fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.1em", color: "#767676", fontWeight: 700 }}>
+      {children}
+    </th>
+  );
+}
+
+function Td({ children }) {
+  return (
+    <td style={{ padding: "0.875rem 1.25rem", verticalAlign: "middle" }}>
+      {children}
+    </td>
+  );
+}
+
+function Stat({ label, value }) {
+  return (
+    <div>
+      <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.1em", color: "#767676", fontWeight: 600, marginBottom: "0.25rem" }}>{label}</div>
+      <div className="text-lg font-bold text-[#1A1A1A]">{value}</div>
+    </div>
+  );
+}
+
+// Format an ISO date string like "5 minutes ago" or "Apr 24"
+function formatRelativeDate(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "—";
+  const now = new Date();
+  const diffMs = now - d;
+  const diffSec = Math.floor(diffMs / 1000);
+  const diffMin = Math.floor(diffSec / 60);
+  const diffHr = Math.floor(diffMin / 60);
+  const diffDay = Math.floor(diffHr / 24);
+  if (diffSec < 60) return "just now";
+  if (diffMin < 60) return `${diffMin} min ago`;
+  if (diffHr < 24) return `${diffHr} hour${diffHr === 1 ? "" : "s"} ago`;
+  if (diffDay < 7) return `${diffDay} day${diffDay === 1 ? "" : "s"} ago`;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: d.getFullYear() === now.getFullYear() ? undefined : "numeric" });
 }
