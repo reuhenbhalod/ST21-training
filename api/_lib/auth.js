@@ -9,7 +9,7 @@ const CLIENT_ID = "9c7894fe-fab8-40ac-a866-81d06f14f68c";
 const ALLOWED_DOMAIN = "smartek21.com";
 
 const JWKS = createRemoteJWKSet(
-  new URL(`https://login.microsoftonline.com/${TENANT_ID}/discovery/v2.0/keys`)
+  new URL(`https://login.microsoftonline.com/${TENANT_ID}/discovery/keys`)
 );
 
 export async function verifyToken(req) {
@@ -20,8 +20,14 @@ export async function verifyToken(req) {
   const token = authHeader.slice("Bearer ".length).trim();
 
   const { payload } = await jwtVerify(token, JWKS, {
-    issuer: `https://login.microsoftonline.com/${TENANT_ID}/v2.0`,
-    audience: CLIENT_ID,
+    issuer: [
+      `https://login.microsoftonline.com/${TENANT_ID}/v2.0`,
+      `https://sts.windows.net/${TENANT_ID}/`
+    ],
+    audience: [
+      CLIENT_ID,
+      `api://${CLIENT_ID}`
+    ],
   });
 
   const email = (
