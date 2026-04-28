@@ -3115,8 +3115,8 @@ function Login({ onAttempt }) {
     // success because the page navigates away. On return, handleRedirectPromise
     // (in the useEffect below) picks up the result.
     await msalInstance.loginRedirect({
-      scopes: ["User.Read"],
-      prompt: "select_account"
+      scopes: MSAL_SCOPES,
+      prompt: "consent"
     });
   } catch (err) {
     setLoading(false);
