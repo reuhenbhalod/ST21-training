@@ -57,7 +57,7 @@ const MSAL_CONFIG = {
 
 // Scopes we ask Microsoft for. User.Read is the basic profile permission.
 // We use the resulting access token to call our own API endpoints.
-const MSAL_SCOPES = ["User.Read"];
+const MSAL_SCOPES = ["api://9c7894fe-fab8-40ac-a866-81d06f14f68c/access_as_user"];
 
 // Base URL for API calls. Empty string means "same origin" — works in
 // Azure Static Web Apps where the API lives at /api on the same domain.
