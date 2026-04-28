@@ -1,19 +1,13 @@
 {
   "name": "api",
   "version": "1.0.0",
-  "description": "",
+  "type": "module",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "engines": {
-    "node": "20"
-  },
   "dependencies": {
-    "jose": "^6.2.3",
-    "mssql": "^12.5.0"
+    "@supabase/supabase-js": "^2.105.0",
+    "jose": "^6.2.3"
   }
 }

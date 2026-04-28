@@ -2,32 +2,24 @@
 // auth.js — Verify Microsoft Entra ID tokens
 // ==========================================================================
 
+import { jwtVerify, createRemoteJWKSet } from "jose";
+
 const TENANT_ID = "4738192e-2424-46c8-a19c-bc2c86665215";
 const CLIENT_ID = "9c7894fe-fab8-40ac-a866-81d06f14f68c";
 const ALLOWED_DOMAIN = "smartek21.com";
 
-let _jose = null;
-let _jwks = null;
+const JWKS = createRemoteJWKSet(
+  new URL(`https://login.microsoftonline.com/${TENANT_ID}/discovery/v2.0/keys`)
+);
 
-async function getJose() {
-  if (!_jose) {
-    _jose = await import("jose");
-    _jwks = _jose.createRemoteJWKSet(
-      new URL(`https://login.microsoftonline.com/${TENANT_ID}/discovery/v2.0/keys`)
-    );
-  }
-  return { jwtVerify: _jose.jwtVerify, jwks: _jwks };
-}
-
-async function verifyToken(req) {
-  const authHeader = req.headers["authorization"] || req.headers["Authorization"];
+export async function verifyToken(req) {
+  const authHeader = req.headers.authorization || req.headers.Authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     throw new Error("Missing or invalid Authorization header");
   }
   const token = authHeader.slice("Bearer ".length).trim();
 
-  const { jwtVerify, jwks } = await getJose();
-  const { payload } = await jwtVerify(token, jwks, {
+  const { payload } = await jwtVerify(token, JWKS, {
     issuer: `https://login.microsoftonline.com/${TENANT_ID}/v2.0`,
     audience: CLIENT_ID,
   });
@@ -52,21 +44,3 @@ async function verifyToken(req) {
 
   return { email, firstName, lastInitial };
 }
-
-function unauthorized(context, message = "Unauthorized") {
-  context.res = {
-    status: 401,
-    headers: { "Content-Type": "application/json" },
-    body: { error: message },
-  };
-}
-
-function jsonResponse(context, status, body) {
-  context.res = {
-    status,
-    headers: { "Content-Type": "application/json" },
-    body,
-  };
-}
-
-module.exports = { verifyToken, unauthorized, jsonResponse };
