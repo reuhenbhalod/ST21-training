@@ -3102,7 +3102,6 @@ export default function SmarTek21Academy() {
 function Login({ onAttempt }) {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [showTestHints, setShowTestHints] = useState(false);
 
   // Trigger the real Microsoft sign-in popup.
   // If MSAL is still initializing or network fails, we show an error.
@@ -3173,16 +3172,16 @@ useEffect(() => {
         <div className="relative z-10 flex flex-col justify-between p-16 w-full text-white">
           <div>
             <img src={LOGO_SRC} alt="SmarTek21" className="h-12 w-auto drop-shadow-sm" />
-            <div className="mt-3 text-xs uppercase tracking-[0.3em] text-white/80 font-medium">Sales Academy</div>
+            <div className="mt-3 text-xs uppercase tracking-[0.3em] text-white/80 font-medium">Training Hub</div>
           </div>
 
           <div>
             <h1 className="text-5xl xl:text-6xl font-bold leading-[1.05] mb-6 tracking-tight">
-              Sell every platform<br />
-              <span className="italic font-light">with confidence</span>
+              Learn. Practice.<br />
+              <span className="italic font-light">Grow with SmarTek21.</span>
             </h1>
             <p className="text-lg text-white/90 max-w-lg leading-relaxed">
-              A structured curriculum covering our platforms, our sales methodology, and the objection handling that closes enterprise deals.
+              The SmarTek21 training hub. Self-paced courses across the company, from technical fundamentals to sales, marketing, and beyond.
             </p>
           </div>
 
@@ -3197,12 +3196,12 @@ useEffect(() => {
         <div className="w-full max-w-md">
           <div className="lg:hidden mb-10">
             <img src={LOGO_SRC} alt="SmarTek21" className="h-10 w-auto" />
-            <div className="mt-3 text-xs uppercase tracking-[0.3em] text-[#E66433] font-medium">Sales Academy</div>
+            <div className="mt-3 text-xs uppercase tracking-[0.3em] text-[#E66433] font-medium">Training Hub</div>
           </div>
 
           <h2 className="text-4xl font-bold text-[#1A1A1A] mb-3 tracking-tight">Sign in</h2>
           <p className="text-[#4A4A4A] mb-10 leading-relaxed">
-            Sign in with your SmarTek21 Microsoft work account to access the course.
+            Sign in with your SmarTek21 Microsoft work account to access your training.
           </p>
 
           {/* Microsoft SSO button */}
@@ -3227,33 +3226,11 @@ useEffect(() => {
             <div className="flex gap-3">
               <Shield className="w-4 h-4 text-[#E66433] flex-shrink-0 mt-0.5" />
               <div className="text-xs text-[#4A4A4A] leading-relaxed">
-                Access is restricted. A valid @smartek21.com Microsoft account is required, and your account must be on the course roster. Contact your sales enablement admin if you need access.
+                Access is restricted to SmarTek21 employees. Sign in with your Microsoft work account to begin.
               </div>
             </div>
           </div>
 
-          <button
-            onClick={() => setShowTestHints(v => !v)}
-            className="mt-8 text-xs text-[#767676] hover:text-[#E66433] flex items-center gap-1.5 transition"
-          >
-            <Circle className="w-2 h-2" fill="currentColor" />
-            {showTestHints ? "Hide demo hints" : "Show demo hints"}
-          </button>
-
-          {showTestHints && (
-            <div className="mt-3 p-4 rounded-md border border-[#E5E5E5] bg-[#FAFAFA] text-xs text-[#4A4A4A] leading-relaxed space-y-2">
-              <div className="font-semibold text-[#1A1A1A]">For demo testing only</div>
-              <div>
-                <span className="text-green-700 font-semibold">Accepted:</span> any @smartek21.com email (e.g. reuhenb@smartek21.com)
-              </div>
-              <div>
-                <span className="text-red-700 font-semibold">Rejected:</span> any email not ending in @smartek21.com
-              </div>
-              <div className="pt-1 text-[#767676]">
-                Signing in opens a real Microsoft login popup. Your Azure tenant controls who can sign in; any smartek21.com user is accepted.
-              </div>
-            </div>
-          )}
         </div>
       </div>
 
@@ -3285,7 +3262,7 @@ function TopNav({ user, onLogout, onHome, overallPercent, isAdmin, isAdminView, 
           <img src={LOGO_SRC} alt="SmarTek21" className="h-9 w-auto" />
           <div className="hidden sm:block h-8 w-px bg-[#E5E5E5]" />
           <div className="hidden sm:block text-left">
-            <div className="text-[10px] uppercase tracking-[0.25em] text-[#E66433] font-semibold">Sales Academy</div>
+            <div className="text-[10px] uppercase tracking-[0.25em] text-[#E66433] font-semibold">Training Hub</div>
             <div className="text-xs text-[#767676]">Internal training</div>
           </div>
         </button>
@@ -3355,13 +3332,13 @@ function Dashboard({ progress, overallPercent, completedCount, totalCount, onOpe
       <div className="mb-12">
         <div className="flex items-center gap-2 mb-3">
           <div className="w-1 h-4 bg-[#E66433]" />
-          <div className="text-xs uppercase tracking-[0.25em] text-[#E66433] font-semibold">Sales Enablement</div>
+          <div className="text-xs uppercase tracking-[0.25em] text-[#E66433] font-semibold">My Training</div>
         </div>
         <h1 className="text-4xl md:text-5xl font-bold text-[#1A1A1A] leading-tight mb-4 tracking-tight">
           Welcome back, {firstName}.
         </h1>
         <p className="text-lg text-[#4A4A4A] max-w-2xl leading-relaxed">
-          Work through each module at your own pace. Read the material, pass the quiz, then move to the next. Score 100% on every quiz to earn your completion badge for the course.
+          Work through each module at your own pace. Read the material, pass the quiz, then move to the next. Score 100% on every quiz to earn your completion badge.
         </p>
       </div>
 
@@ -3413,7 +3390,7 @@ function Dashboard({ progress, overallPercent, completedCount, totalCount, onOpe
             </div>
             <div>
               <h3 className="text-2xl font-bold mb-1 tracking-tight">Course complete.</h3>
-              <p className="text-white/90 leading-relaxed">You have passed every module. Share this achievement with your manager and start applying it on your next discovery call.</p>
+              <p className="text-white/90 leading-relaxed">You have passed every module. Share this achievement with your manager and put what you learned to use.</p>
             </div>
           </div>
         </div>
@@ -4110,9 +4087,9 @@ function Footer() {
       <div className="max-w-6xl mx-auto px-6 py-6 flex flex-col sm:flex-row items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <img src={LOGO_SRC} alt="SmarTek21" className="h-6 w-auto opacity-80" />
-          <div className="text-xs text-[#767676]">Sales Academy · Internal training material</div>
+          <div className="text-xs text-[#767676]">Training Hub · Internal training material</div>
         </div>
-        <div className="text-xs text-[#767676]">For questions, contact the sales enablement team.</div>
+        <div className="text-xs text-[#767676]">For questions, contact the training team.</div>
       </div>
     </footer>
   );
@@ -4177,7 +4154,7 @@ function AdminUserList({ apiCall, onBack, onSelectUser }) {
           <div className="text-xs uppercase tracking-[0.25em] text-[#E66433] font-semibold">Admin</div>
         </div>
         <h1 className="text-4xl font-bold text-[#1A1A1A] mb-2 tracking-tight">User progress</h1>
-        <p className="text-[#4A4A4A]">All users who have signed in to the Sales Academy. Click a row to see their full progress and quiz history.</p>
+        <p className="text-[#4A4A4A]">All users who have signed in to the Training Hub. Click a row to see their full progress and quiz history.</p>
       </div>
 
       {loading && (
