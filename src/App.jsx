@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { PublicClientApplication } from "@azure/msal-browser";
 import {
   Lock, Mail, LogOut, BookOpen, ClipboardCheck,
@@ -2754,16 +2754,25 @@ export default function SmarTek21Academy() {
   const [authState, setAuthState] = useState("login"); // login | authed
   const [user, setUser] = useState(null);
   const [accessToken, setAccessToken] = useState(null); // Microsoft token for API calls
+  // Mirror of accessToken so getFreshToken can read the cached token without
+  // taking it as a dependency (keeps getFreshToken/apiCall referentially stable).
+  const accessTokenRef = useRef(null);
   const [isAdmin, setIsAdmin] = useState(false);
 
   const [view, setView] = useState("dashboard"); // dashboard | reading | quiz | admin
   const [activeSectionId, setActiveSectionId] = useState(null);
   const [progress, setProgress] = useState({});
+  // Mirror of progress so saveProgress can read the latest committed value
+  // without the setState-as-reader hack (which can double-fire the network call).
+  const progressRef = useRef({});
   const [quizState, setQuizState] = useState({ questions: [], answers: {}, submitted: false });
 
   // API state
   const [progressLoading, setProgressLoading] = useState(false);
   const [apiError, setApiError] = useState(null);
+  // True when the most recent save did not reach the server, so the UI can warn
+  // the user instead of silently dropping their progress.
+  const [saveError, setSaveError] = useState(false);
   const activeSection = useMemo(
     () => COURSE.find(s => s.id === activeSectionId),
     [activeSectionId]
@@ -2775,27 +2784,42 @@ export default function SmarTek21Academy() {
   // Re-acquires the token silently if the cached one expired.
   // ----------------------------------------------------------------------
 
-  const getFreshToken = useCallback(async () => {
-    // Try cached token first; if it works, return it
-    if (accessToken) return accessToken;
-    // Otherwise acquire silently using the MSAL session
+  // Keep accessTokenRef in sync with state (login, logout, refresh).
+  useEffect(() => { accessTokenRef.current = accessToken; }, [accessToken]);
+
+  // Keep progressRef in sync so saveProgress can merge against the latest value.
+  useEffect(() => { progressRef.current = progress; }, [progress]);
+
+  const getFreshToken = useCallback(async ({ forceRefresh = false } = {}) => {
+    // Always go through MSAL. acquireTokenSilent returns the cached token while
+    // it is still valid and transparently uses the refresh token to mint a new
+    // one once it has expired (or when forceRefresh is set). This is the fix
+    // for silently-failing saves: we never hand out a stale in-memory token.
     const accounts = msalInstance.getAllAccounts();
-    if (accounts.length === 0) return null;
+    if (accounts.length === 0) {
+      // No MSAL session (e.g. a manually-supplied token in dev); use the cache.
+      return accessTokenRef.current;
+    }
     try {
       const result = await msalInstance.acquireTokenSilent({
         scopes: MSAL_SCOPES,
-        account: accounts[0]
+        account: accounts[0],
+        forceRefresh
       });
-      setAccessToken(result.accessToken);
+      accessTokenRef.current = result.accessToken;
+      // Bail out of a re-render when the token is unchanged (the common case),
+      // so this doesn't churn effects that depend on accessToken/apiCall.
+      setAccessToken(prev => (prev === result.accessToken ? prev : result.accessToken));
       return result.accessToken;
     } catch (err) {
       console.warn("acquireTokenSilent failed:", err);
-      return null;
+      // Fall back to whatever is cached; may be expired, but better than nothing.
+      return accessTokenRef.current;
     }
-  }, [accessToken]);
+  }, []);
 
-  const apiCall = useCallback(async (path, options = {}) => {
-    const token = await getFreshToken();
+  const apiCall = useCallback(async (path, options = {}, _retried = false) => {
+    const token = await getFreshToken({ forceRefresh: _retried });
     if (!token) throw new Error("No access token available");
     const res = await fetch(`${API_BASE}${path}`, {
       ...options,
@@ -2805,6 +2829,11 @@ export default function SmarTek21Academy() {
         ...(options.headers || {})
       }
     });
+    // The server rejected the token (most likely expired). Force a refresh and
+    // retry exactly once before giving up.
+    if (res.status === 401 && !_retried) {
+      return apiCall(path, options, true);
+    }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       throw new Error(`API ${res.status}: ${text || res.statusText}`);
@@ -2865,38 +2894,34 @@ export default function SmarTek21Academy() {
   // ----------------------------------------------------------------------
 
   const saveProgress = useCallback(async (sectionId, patch) => {
-    // Optimistic local update first so the UI feels instant
-    setProgress(prev => {
-      const cur = prev[sectionId] || { read: false, best: 0, passed: false, attemptsCount: 0 };
-      const next = { ...cur, ...patch };
-      // Best score should never go down
-      if (typeof patch.best === "number") {
-        next.best = Math.max(cur.best || 0, patch.best);
-      }
-      next.passed = cur.passed || !!patch.passed;
-      return { ...prev, [sectionId]: next };
-    });
-    // Then persist to the server
+    // Compute the merged value from the latest committed progress (via the ref).
+    const cur = progressRef.current[sectionId] || { read: false, best: 0, passed: false, attemptsCount: 0 };
+    const merged = { ...cur, ...patch };
+    // Best score should never go down; passed is sticky once earned.
+    if (typeof patch.best === "number") merged.best = Math.max(cur.best || 0, patch.best);
+    merged.passed = cur.passed || !!patch.passed;
+
+    // Optimistic local update first so the UI feels instant.
+    progressRef.current = { ...progressRef.current, [sectionId]: merged };
+    setProgress(prev => ({ ...prev, [sectionId]: merged }));
+
+    // Persist to the server. apiCall already refreshes the token and retries once
+    // on a 401, so a failure here is a real one — surface it instead of swallowing.
     try {
-      // We need the merged value to send, so re-read it from the closure of the latest state
-      // Easier: reconstruct what we just stored
-      setProgress(currentSnapshot => {
-        const merged = currentSnapshot[sectionId] || {};
-        // Fire and forget the API call. Errors are logged but don't block UI.
-        apiCall("/api/progress", {
-          method: "POST",
-          body: JSON.stringify({
-            sectionId,
-            read: !!merged.read,
-            bestScore: merged.best || 0,
-            passed: !!merged.passed,
-            attemptsCount: merged.attemptsCount || 0
-          })
-        }).catch(err => console.warn("saveProgress failed:", err));
-        return currentSnapshot; // no state change here, just used for the read
+      await apiCall("/api/progress", {
+        method: "POST",
+        body: JSON.stringify({
+          sectionId,
+          read: !!merged.read,
+          bestScore: merged.best || 0,
+          passed: !!merged.passed,
+          attemptsCount: merged.attemptsCount || 0
+        })
       });
+      setSaveError(false);
     } catch (err) {
-      console.warn("saveProgress error:", err);
+      console.warn("saveProgress failed:", err);
+      setSaveError(true);
     }
   }, [apiCall]);
 
@@ -2947,6 +2972,9 @@ export default function SmarTek21Academy() {
     setView("dashboard");
     setActiveSectionId(null);
     setProgress({});
+    progressRef.current = {};
+    setSaveError(false);
+    setApiError(null);
     setQuizState({ questions: [], answers: {}, submitted: false });
   }
 
@@ -3029,6 +3057,19 @@ export default function SmarTek21Academy() {
         }}
       />
 
+      {(saveError || apiError) && (
+        <div className="sticky top-0 z-40 bg-[#FBE9E4] border-b border-[#E66433]/40">
+          <div className="max-w-6xl mx-auto px-6 py-3 flex items-center gap-3 text-sm text-[#8A2C12]">
+            <AlertCircle size={18} className="shrink-0" />
+            <span className="font-medium">
+              {saveError
+                ? "We couldn't save your latest progress. Check your connection — it will be retried the next time you pass a quiz or open a module. Avoid signing out until this clears."
+                : apiError}
+            </span>
+          </div>
+        </div>
+      )}
+
       {view === "dashboard" && progressLoading && (
         <div className="max-w-3xl mx-auto px-6 py-24 text-center">
           <div className="text-sm uppercase tracking-[0.2em] text-[#E66433] font-bold mb-2">Loading</div>
@@ -3046,7 +3087,6 @@ export default function SmarTek21Academy() {
           user={user}
           isAdmin={isAdmin}
           onOpenAdmin={() => setView("admin")}
-          apiError={apiError}
         />
       )}
 
