@@ -30,20 +30,12 @@ export async function verifyToken(req) {
     ],
   });
 
-  // Resolve a stable identity that is IDENTICAL across v1.0 and v2.0 tokens.
-  // We now accept both token versions, and the claim set differs between them:
-  // v2.0 tokens carry `preferred_username` (the UPN) but often omit `upn`, while
-  // v1.0 tokens carry `upn` but often omit `preferred_username`. For a member
-  // account both of those resolve to the same UPN, so checking them first keeps
-  // the same user keyed to the same row regardless of which token version we get.
-  // `email` is checked LAST because it can be a different primary-SMTP alias and
-  // would otherwise split one user's progress across two keys.
   const email = (
     payload.preferred_username ||
-    payload.upn ||
     payload.email ||
+    payload.upn ||
     ""
-  ).toLowerCase().trim();
+  ).toLowerCase();
 
   if (!email.endsWith(`@${ALLOWED_DOMAIN}`)) {
     throw new Error(`User ${email} is not from the ${ALLOWED_DOMAIN} domain`);
