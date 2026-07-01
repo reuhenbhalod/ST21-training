@@ -1,5 +1,5 @@
 import { verifyToken } from "./_lib/auth.js";
-import { getDb } from "./_lib/db.js";
+import { getUser, listAllUsers, scanAllProgress } from "./_lib/db.js";
 
 export default async function handler(req, res) {
   let user;
@@ -10,28 +10,13 @@ export default async function handler(req, res) {
   }
 
   try {
-    const db = getDb();
-
-    const { data: me } = await db
-      .from("users")
-      .select("is_admin")
-      .eq("email", user.email)
-      .maybeSingle();
-
+    const me = await getUser(user.email);
     if (!me?.is_admin) {
       return res.status(403).json({ error: "Admin access required" });
     }
 
-    const { data: users, error: usersError } = await db
-      .from("users")
-      .select("email, first_name, last_initial, first_seen, last_seen, total_logins, is_admin")
-      .order("last_seen", { ascending: false });
-    if (usersError) throw usersError;
-
-    const { data: progress, error: progressError } = await db
-      .from("user_progress")
-      .select("email, passed, best_score");
-    if (progressError) throw progressError;
+    const users = await listAllUsers(); // already sorted newest last_seen first
+    const progress = await scanAllProgress();
 
     const stats = {};
     for (const row of progress) {

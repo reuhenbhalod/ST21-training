@@ -1,5 +1,5 @@
 import { verifyToken } from "./_lib/auth.js";
-import { getDb } from "./_lib/db.js";
+import { getProgressItem, queryProgress, putProgress } from "./_lib/db.js";
 
 export default async function handler(req, res) {
   let user;
@@ -10,17 +10,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    const db = getDb();
-
     if (req.method === "GET") {
-      const { data, error } = await db
-        .from("user_progress")
-        .select("section_id, has_read, best_score, passed, attempts_count")
-        .eq("email", user.email);
-      if (error) throw error;
-
+      const rows = await queryProgress(user.email);
       const progress = {};
-      for (const row of data) {
+      for (const row of rows) {
         progress[row.section_id] = {
           read: !!row.has_read,
           best: row.best_score,
@@ -37,32 +30,20 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "sectionId is required" });
       }
 
-      const { data: existing } = await db
-        .from("user_progress")
-        .select("best_score, passed")
-        .eq("email", user.email)
-        .eq("section_id", sectionId)
-        .maybeSingle();
+      const existing = await getProgressItem(user.email, sectionId);
 
-      const newBestScore = Math.max(
-        bestScore || 0,
-        existing?.best_score || 0
-      );
+      const newBestScore = Math.max(bestScore || 0, existing?.best_score || 0);
       const newPassed = !!passed || !!existing?.passed;
 
-      const { error } = await db.from("user_progress").upsert(
-        {
-          email: user.email,
-          section_id: sectionId,
-          has_read: !!read,
-          best_score: newBestScore,
-          passed: newPassed,
-          attempts_count: attemptsCount || 0,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: "email,section_id" }
-      );
-      if (error) throw error;
+      await putProgress({
+        email: user.email,
+        section_id: sectionId,
+        has_read: !!read,
+        best_score: newBestScore,
+        passed: newPassed,
+        attempts_count: attemptsCount || 0,
+        updated_at: new Date().toISOString(),
+      });
 
       return res.status(200).json({ ok: true });
     }

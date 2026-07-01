@@ -1,5 +1,6 @@
+import { randomUUID } from "node:crypto";
 import { verifyToken } from "./_lib/auth.js";
-import { getDb } from "./_lib/db.js";
+import { putAttempt } from "./_lib/db.js";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -19,16 +20,16 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "sectionId, score, and passed are required" });
     }
 
-    const db = getDb();
-    const { error } = await db.from("quiz_attempts").insert({
+    await putAttempt({
+      id: randomUUID(),
       email: user.email,
       section_id: sectionId,
       score,
       passed,
       questions_json: questions || [],
       answers_json: answers || {},
+      submitted_at: new Date().toISOString(),
     });
-    if (error) throw error;
 
     return res.status(200).json({ ok: true });
   } catch (err) {
