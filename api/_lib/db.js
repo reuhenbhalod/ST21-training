@@ -39,6 +39,7 @@ const PROFILE_SK = "PROFILE";
 const progSk = (sectionId) => `PROG#${sectionId}`;
 const PROG_PREFIX = "PROG#";
 const ATT_PREFIX = "ATT#";
+const CHAT_PREFIX = "CHAT#";
 
 // --------------------------------------------------------------------------
 // Users (profiles)
@@ -196,6 +197,34 @@ export async function queryAttempts(email, limit = 50) {
       TableName: TABLE,
       KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
       ExpressionAttributeValues: { ":pk": pk(email), ":sk": ATT_PREFIX },
+      ScanIndexForward: false, // newest submitted_at first
+      Limit: limit,
+    })
+  );
+  return out.Items || [];
+}
+
+// --------------------------------------------------------------------------
+// Chat logs (append-only) — audit trail of AI assistant conversations.
+// --------------------------------------------------------------------------
+
+export async function putChatLog(entry) {
+  // submitted_at leads the SK so a reverse Query returns newest-first for free.
+  const sk = `${CHAT_PREFIX}${entry.submitted_at}#${entry.id}`;
+  await doc().send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: { PK: pk(entry.email), SK: sk, ...entry },
+    })
+  );
+}
+
+export async function queryChatLogs(email, limit = 50) {
+  const out = await doc().send(
+    new QueryCommand({
+      TableName: TABLE,
+      KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+      ExpressionAttributeValues: { ":pk": pk(email), ":sk": CHAT_PREFIX },
       ScanIndexForward: false, // newest submitted_at first
       Limit: limit,
     })

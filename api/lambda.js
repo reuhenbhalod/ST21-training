@@ -15,6 +15,7 @@ import heartbeat from "./heartbeat.js";
 import quizAttempt from "./quiz-attempt.js";
 import adminUsers from "./admin-users.js";
 import adminUserDetail from "./admin-user-detail.js";
+import chat from "./chat.js";
 
 const ROUTES = {
   "/api/health": health,
@@ -23,6 +24,7 @@ const ROUTES = {
   "/api/quiz-attempt": quizAttempt,
   "/api/admin-users": adminUsers,
   "/api/admin-user-detail": adminUserDetail,
+  "/api/chat": chat,
 };
 
 const CORS = {

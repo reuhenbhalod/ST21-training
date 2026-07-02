@@ -12,6 +12,28 @@ Parameters:
     Description: >
       CORS origin for the API. After the first deploy, set this to your
       CloudFront URL (https://xxxx.cloudfront.net) and redeploy to lock it down.
+  CustomDomain:
+    Type: String
+    Default: ""
+    Description: >
+      Optional custom domain for the site (e.g. training.smartek21.com). Leave
+      empty to use only the default *.cloudfront.net URL.
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: >
+      ACM certificate ARN (must be in us-east-1) covering CustomDomain. Required
+      when CustomDomain is set.
+  BedrockModelId:
+    Type: String
+    Default: "us.amazon.nova-lite-v1:0"
+    Description: >
+      Bedrock model / inference-profile id used by /api/chat. Amazon Nova Lite.
+      Confirm the exact invocable id in the Bedrock console after enabling model
+      access (the base model id is amazon.nova-lite-v1:0).
+
+Conditions:
+  HasCustomDomain: !Not [!Equals [!Ref CustomDomain, ""]]
 
 Globals:
   Function:
@@ -47,7 +69,10 @@ Resources:
         PointInTimeRecoveryEnabled: true
 
   # ---------------------------------------------------------------------------
-  # API — one Lambda, all 6 routes, exposed via a Function URL.
+  # API — one Lambda, all 7 routes, exposed via a Function URL.
+  # /api/chat calls Amazon Nova Lite via Bedrock. Guardrails are handled in
+  # code (topic-classifier pre-check + system-prompt grounding), so no Bedrock
+  # Guardrail resource is needed. Timeout is bumped for the two Bedrock calls.
   # ---------------------------------------------------------------------------
   ApiFunction:
     Type: AWS::Serverless::Function
@@ -55,13 +80,21 @@ Resources:
       FunctionName: smartek21-academy-api
       CodeUri: api/
       Handler: lambda.handler
+      Timeout: 30
       Environment:
         Variables:
           TABLE_NAME: !Ref Table
           ALLOWED_ORIGIN: !Ref AllowedOrigin
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref Table
+        - Statement:
+            - Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource:
+                - !Sub "arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0"
+                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*amazon.nova-lite-v1:0"
       FunctionUrlConfig:
         AuthType: NONE
         Cors:
@@ -117,6 +150,13 @@ Resources:
         Enabled: true
         DefaultRootObject: index.html
         PriceClass: PriceClass_100
+        Aliases: !If [HasCustomDomain, [!Ref CustomDomain], !Ref "AWS::NoValue"]
+        ViewerCertificate: !If
+          - HasCustomDomain
+          - AcmCertificateArn: !Ref CertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - !Ref "AWS::NoValue"
         Origins:
           - Id: s3-site
             DomainName: !GetAtt SiteBucket.RegionalDomainName

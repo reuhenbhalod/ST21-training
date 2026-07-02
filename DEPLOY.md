@@ -118,6 +118,30 @@ Then:
 
 ---
 
+## AI Chat assistant (`/api/chat`)
+
+An in-app floating assistant answers questions about the training modules using
+**Amazon Nova Lite** via Bedrock. It is grounded strictly in the course
+content and refuses off-topic questions.
+
+- **Knowledge base:** `npm run build:kb` flattens `src/courseData.jsx` into
+  `api/course-kb.json` (quiz answers excluded). `npm run build` runs it
+  automatically, and it is bundled into the Lambda by `sam build`. Re-run after
+  editing course content.
+- **Model:** set by the `BedrockModelId` template parameter (default
+  `us.amazon.nova-lite-v1:0`). Confirm model access is ACTIVE for Nova Lite in
+  the Bedrock console; if you switch regions/models, enable access there and
+  confirm the invocable id.
+- **Guardrails (no Bedrock Guardrail resource):** two cheap layers in
+  `api/chat.js` — (1) a tiny Nova topic-classifier pre-check that refuses
+  off-topic asks before the expensive call, and (2) system-prompt grounding.
+  A Bedrock Guardrail can be layered in later by setting the `GUARDRAIL_ID` /
+  `GUARDRAIL_VERSION` env vars (the handler already conditionally applies it).
+- **IAM:** the Lambda role has `bedrock:InvokeModel` scoped to the Nova Lite
+  foundation model + inference profiles.
+- **Audit:** each conversation turn is logged to DynamoDB
+  (`PK=USER#<email>`, `SK=CHAT#<ts>#<id>`), fire-and-forget.
+
 ## Notes & cost
 
 - **DynamoDB** is on-demand (pay per request) → effectively $0 for this workload.
