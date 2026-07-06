@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build:kb": "node scripts/build-course-kb.mjs",
+    "build": "npm run build:kb && vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },

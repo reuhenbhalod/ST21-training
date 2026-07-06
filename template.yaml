@@ -1,0 +1,208 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  SmarTek21 Academy — static React site on S3 + CloudFront, API on a single
+  Lambda (Function URL), data in DynamoDB on-demand. Entra ID auth is unchanged
+  (verified in-Lambda against Microsoft's public keys). Designed for ~$0/month.
+
+Parameters:
+  AllowedOrigin:
+    Type: String
+    Default: "*"
+    Description: >
+      CORS origin for the API. After the first deploy, set this to your
+      CloudFront URL (https://xxxx.cloudfront.net) and redeploy to lock it down.
+  CustomDomain:
+    Type: String
+    Default: ""
+    Description: >
+      Optional custom domain for the site (e.g. training.smartek21.com). Leave
+      empty to use only the default *.cloudfront.net URL.
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: >
+      ACM certificate ARN (must be in us-east-1) covering CustomDomain. Required
+      when CustomDomain is set.
+  BedrockModelId:
+    Type: String
+    Default: "us.amazon.nova-lite-v1:0"
+    Description: >
+      Bedrock model / inference-profile id used by /api/chat. Amazon Nova Lite.
+      Confirm the exact invocable id in the Bedrock console after enabling model
+      access (the base model id is amazon.nova-lite-v1:0).
+
+Conditions:
+  HasCustomDomain: !Not [!Equals [!Ref CustomDomain, ""]]
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Timeout: 15
+    MemorySize: 256
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # DynamoDB — single table, on-demand (pay per request). GSI1 lists all user
+  # profiles ordered by last_seen for the admin dashboard.
+  # ---------------------------------------------------------------------------
+  Table:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: smartek21-academy
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: PK, AttributeType: S }
+        - { AttributeName: SK, AttributeType: S }
+        - { AttributeName: GSI1PK, AttributeType: S }
+        - { AttributeName: GSI1SK, AttributeType: S }
+      KeySchema:
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - { AttributeName: GSI1PK, KeyType: HASH }
+            - { AttributeName: GSI1SK, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ---------------------------------------------------------------------------
+  # API — one Lambda, all 7 routes, exposed via a Function URL.
+  # /api/chat calls Amazon Nova Lite via Bedrock. Guardrails are handled in
+  # code (topic-classifier pre-check + system-prompt grounding), so no Bedrock
+  # Guardrail resource is needed. Timeout is bumped for the two Bedrock calls.
+  # ---------------------------------------------------------------------------
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: smartek21-academy-api
+      CodeUri: api/
+      Handler: lambda.handler
+      Timeout: 30
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref Table
+          ALLOWED_ORIGIN: !Ref AllowedOrigin
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Table
+        - Statement:
+            - Effect: Allow
+              Action: bedrock:InvokeModel
+              Resource:
+                - !Sub "arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0"
+                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*amazon.nova-lite-v1:0"
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowOrigins: ["*"]
+          AllowMethods: ["GET", "POST"]
+          AllowHeaders: ["Content-Type", "Authorization"]
+
+  # ---------------------------------------------------------------------------
+  # Static site bucket (private; only CloudFront can read it via OAC).
+  # ---------------------------------------------------------------------------
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "smartek21-academy-site-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  SiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${SiteBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
+  OAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "smartek21-academy-oac-${AWS::AccountId}"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # ---------------------------------------------------------------------------
+  # CloudFront: default origin = S3 (static SPA); /api/* origin = Lambda URL.
+  # SPA deep links fall back to index.html (403/404 -> /index.html, 200).
+  # ---------------------------------------------------------------------------
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_100
+        Aliases: !If [HasCustomDomain, [!Ref CustomDomain], !Ref "AWS::NoValue"]
+        ViewerCertificate: !If
+          - HasCustomDomain
+          - AcmCertificateArn: !Ref CertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - !Ref "AWS::NoValue"
+        Origins:
+          - Id: s3-site
+            DomainName: !GetAtt SiteBucket.RegionalDomainName
+            OriginAccessControlId: !Ref OAC
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+          - Id: lambda-api
+            # Function URL is https://<host>/ — take just the host for CloudFront.
+            DomainName: !Select [2, !Split ["/", !GetAtt ApiFunctionUrl.FunctionUrl]]
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols: ["TLSv1.2"]
+        DefaultCacheBehavior:
+          TargetOriginId: s3-site
+          ViewerProtocolPolicy: redirect-to-https
+          # CachingOptimized managed policy
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: lambda-api
+            ViewerProtocolPolicy: https-only
+            AllowedMethods: ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+            # CachingDisabled managed policy
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            # AllViewerExceptHostHeader — forwards Authorization, drops Host
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+
+Outputs:
+  SiteURL:
+    Description: Public URL of the app (use as Entra redirect URI + AllowedOrigin)
+    Value: !Sub "https://${Distribution.DomainName}"
+  BucketName:
+    Description: Upload the built site here (aws s3 sync dist/ s3://BUCKET)
+    Value: !Ref SiteBucket
+  DistributionId:
+    Description: CloudFront distribution id (for cache invalidation)
+    Value: !Ref Distribution
+  ApiFunctionUrl:
+    Description: Direct Lambda URL (normally reached only via CloudFront /api/*)
+    Value: !GetAtt ApiFunctionUrl.FunctionUrl
+  TableName:
+    Value: !Ref Table
