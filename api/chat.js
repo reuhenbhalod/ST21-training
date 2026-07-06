@@ -15,12 +15,15 @@
 import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
 import { randomUUID } from "node:crypto";
 import { verifyToken } from "./_lib/auth.js";
-import { putChatLog } from "./_lib/db.js";
+import { putChatLog, consumeRateLimit } from "./_lib/db.js";
 import kb from "./course-kb.json" with { type: "json" };
 
 const MODEL_ID = process.env.BEDROCK_MODEL_ID;
 const MAX_MESSAGE = 4000; // chars
 const MAX_HISTORY = 10; // turns kept from the client
+// Per-user limits (set via template parameters; fallbacks match the defaults).
+const RATE_LIMIT_PER_MINUTE = parseInt(process.env.CHAT_RATE_LIMIT_PER_MINUTE, 10) || 10;
+const RATE_LIMIT_PER_DAY = parseInt(process.env.CHAT_RATE_LIMIT_PER_DAY, 10) || 100;
 export const REFUSAL =
   "I can only help with the SmarTek21 sales-training modules. Try asking about one of the course topics.";
 
@@ -113,6 +116,34 @@ export function sanitizeHistory(history) {
   return out;
 }
 
+// Rate-limit gate: two fixed windows per user — a minute burst cap and a
+// UTC-day cost cap — enforced with atomic conditional counters in DynamoDB.
+// Runs BEFORE any Bedrock call, so a limited request costs one cheap write
+// and zero model tokens. All time values are derived from the request's own
+// timestamp (no timers, no reset jobs): the minute window is epoch-minutes,
+// the day window is the UTC date, and Retry-After is the distance to the
+// next window boundary. Unexpected DynamoDB errors fall OPEN, matching the
+// classifier's availability-over-strictness philosophy.
+// Returns null when allowed, or { scope, retryAfterSeconds } when limited.
+export async function checkRateLimit(email, nowMs) {
+  const nowSec = Math.floor(nowMs / 1000);
+  const minuteWindow = String(Math.floor(nowSec / 60));
+  const dayWindow = new Date(nowMs).toISOString().slice(0, 10); // e.g. 2026-07-06
+  try {
+    // Minute first: a script grinding past its daily cap still gets throttled
+    // to the burst rate (a rejected-for-day request consumes a minute token).
+    if (!(await consumeRateLimit(email, "chat", minuteWindow, RATE_LIMIT_PER_MINUTE, nowSec + 5 * 60))) {
+      return { scope: "minute", retryAfterSeconds: 60 - (nowSec % 60) };
+    }
+    if (!(await consumeRateLimit(email, "chat", dayWindow, RATE_LIMIT_PER_DAY, nowSec + 2 * 86400))) {
+      return { scope: "day", retryAfterSeconds: 86400 - (nowSec % 86400) };
+    }
+  } catch (err) {
+    console.error("rate limit check failed, falling open:", err);
+  }
+  return null;
+}
+
 // Layer 1: cheap semantic classifier. Returns true if on-topic. Falls OPEN on
 // error (the grounded main call is the real refusal path).
 export async function isOnTopic(historyMsgs, message) {
@@ -165,6 +196,22 @@ export default async function handler(req, res) {
     }
     if (message.length > MAX_MESSAGE) {
       return res.status(400).json({ error: "message too long" });
+    }
+
+    // Rate limit before ANY Bedrock work (the classifier is a model call too).
+    // No DynamoDB audit item for rejected requests — an abuser shouldn't be
+    // able to generate writes — but the warn line lands in CloudWatch Logs.
+    const limited = await checkRateLimit(user.email, Date.now());
+    if (limited) {
+      console.warn(`rate limited: ${user.email} scope=${limited.scope}`);
+      return res
+        .status(429)
+        .setHeader("Retry-After", limited.retryAfterSeconds)
+        .json({
+          error: "rate_limited",
+          scope: limited.scope,
+          retryAfterSeconds: limited.retryAfterSeconds,
+        });
     }
 
     const historyMsgs = sanitizeHistory(history);

@@ -216,7 +216,17 @@ export default function SmarTek21Academy() {
     }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`API ${res.status}: ${text || res.statusText}`);
+      const err = new Error(`API ${res.status}: ${text || res.statusText}`);
+      // Attach the status and parsed body so callers can branch on specific
+      // failures (ChatPanel turns a 429 into a cooldown instead of a generic
+      // error). The body may not be JSON — keep null in that case.
+      err.status = res.status;
+      try {
+        err.body = JSON.parse(text);
+      } catch {
+        err.body = null;
+      }
+      throw err;
     }
     return res.json();
   }, [getFreshToken]);

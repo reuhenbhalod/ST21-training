@@ -141,6 +141,17 @@ content and refuses off-topic questions.
   foundation model + inference profiles.
 - **Audit:** each conversation turn is logged to DynamoDB
   (`PK=USER#<email>`, `SK=CHAT#<ts>#<id>`), fire-and-forget.
+- **Rate limiting:** each user gets **10 chat messages/minute** (burst) and
+  **100/day** (cost cap), enforced in `api/chat.js` *before* any Bedrock call
+  via atomic fixed-window counters in the same DynamoDB table
+  (`SK=RL#chat#<window>`; a table TTL on `expires_at` garbage-collects old
+  windows). Over the limit → `429` + `Retry-After`; the chat panel shows a
+  cooldown countdown. Tune with the `ChatRateLimitPerMinute` /
+  `ChatRateLimitPerDay` template parameters (`sam deploy
+  --parameter-overrides ChatRateLimitPerDay=200`). If the counter write
+  itself errors the request is allowed through (fail open). Rejected
+  requests are not audit-logged; they emit a `rate limited:` warn line to
+  CloudWatch Logs.
 
 ## Notes & cost
 

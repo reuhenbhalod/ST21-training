@@ -40,6 +40,7 @@ const progSk = (sectionId) => `PROG#${sectionId}`;
 const PROG_PREFIX = "PROG#";
 const ATT_PREFIX = "ATT#";
 const CHAT_PREFIX = "CHAT#";
+const RL_PREFIX = "RL#";
 
 // --------------------------------------------------------------------------
 // Users (profiles)
@@ -230,6 +231,38 @@ export async function queryChatLogs(email, limit = 50) {
     })
   );
   return out.Items || [];
+}
+
+// --------------------------------------------------------------------------
+// Rate limiting — per-user fixed-window counters (PK=USER#<email>,
+// SK=RL#<bucket>#<windowId>). The window id is derived from the request
+// timestamp by the caller, so counters "reset" by simply landing on a new
+// key; expired ones are garbage-collected by the table's TTL on expires_at.
+// --------------------------------------------------------------------------
+
+// Atomically consume one request from a window. Creates the counter at 1 on
+// first use, increments while under `limit`. The increment and the limit
+// check are a single conditional write, so concurrent Lambda containers
+// cannot race past the limit. Returns true if allowed, false if the limit is
+// hit. Any other DynamoDB failure propagates — the caller owns fail-open.
+export async function consumeRateLimit(email, bucket, windowId, limit, expiresAtEpochSec) {
+  try {
+    await doc().send(
+      new UpdateCommand({
+        TableName: TABLE,
+        Key: { PK: pk(email), SK: `${RL_PREFIX}${bucket}#${windowId}` },
+        // "count" is a DynamoDB reserved word, hence the #c alias.
+        UpdateExpression: "ADD #c :one SET expires_at = if_not_exists(expires_at, :exp)",
+        ConditionExpression: "attribute_not_exists(#c) OR #c < :limit",
+        ExpressionAttributeNames: { "#c": "count" },
+        ExpressionAttributeValues: { ":one": 1, ":limit": limit, ":exp": expiresAtEpochSec },
+      })
+    );
+    return true;
+  } catch (err) {
+    if (err.name === "ConditionalCheckFailedException") return false;
+    throw err;
+  }
 }
 
 // --------------------------------------------------------------------------

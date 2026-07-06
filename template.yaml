@@ -31,6 +31,17 @@ Parameters:
       Bedrock model / inference-profile id used by /api/chat. Amazon Nova Lite.
       Confirm the exact invocable id in the Bedrock console after enabling model
       access (the base model id is amazon.nova-lite-v1:0).
+  ChatRateLimitPerMinute:
+    Type: Number
+    Default: 10
+    Description: >
+      Max /api/chat requests per user per minute (burst cap). Tunable at deploy
+      time without a code change.
+  ChatRateLimitPerDay:
+    Type: Number
+    Default: 100
+    Description: >
+      Max /api/chat requests per user per UTC day (cost cap).
 
 Conditions:
   HasCustomDomain: !Not [!Equals [!Ref CustomDomain, ""]]
@@ -67,6 +78,12 @@ Resources:
           Projection: { ProjectionType: ALL }
       PointInTimeRecoverySpecification:
         PointInTimeRecoveryEnabled: true
+      # Garbage-collects expired per-user rate-limit counters (RL#chat#…).
+      # Correctness never depends on deletion timing — old windows are simply
+      # never read again — so lazy TTL deletion is fine.
+      TimeToLiveSpecification:
+        AttributeName: expires_at
+        Enabled: true
 
   # ---------------------------------------------------------------------------
   # API — one Lambda, all 7 routes, exposed via a Function URL.
@@ -86,6 +103,8 @@ Resources:
           TABLE_NAME: !Ref Table
           ALLOWED_ORIGIN: !Ref AllowedOrigin
           BEDROCK_MODEL_ID: !Ref BedrockModelId
+          CHAT_RATE_LIMIT_PER_MINUTE: !Ref ChatRateLimitPerMinute
+          CHAT_RATE_LIMIT_PER_DAY: !Ref ChatRateLimitPerDay
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref Table

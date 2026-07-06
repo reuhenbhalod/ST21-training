@@ -63,15 +63,20 @@ function makeReqRes(event) {
   let resolve;
   const done = new Promise((r) => (resolve = r));
   let statusCode = 200;
+  const extraHeaders = {};
   const res = {
     status(code) {
       statusCode = code;
       return res;
     },
+    setHeader(name, value) {
+      extraHeaders[name] = String(value);
+      return res;
+    },
     json(payload) {
       resolve({
         statusCode,
-        headers: { "Content-Type": "application/json", ...CORS },
+        headers: { "Content-Type": "application/json", ...CORS, ...extraHeaders },
         body: JSON.stringify(payload),
       });
       return res;

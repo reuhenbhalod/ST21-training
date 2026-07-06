@@ -17,6 +17,10 @@ export default function ChatPanel({ apiCall, activeSectionId }) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  // Set when the server rate-limits us (429): { scope: "minute"|"day", seconds }.
+  // While active, sending is disabled and a notice with a countdown is shown;
+  // `seconds` ticks down to 0, at which point cooldown clears itself.
+  const [cooldown, setCooldown] = useState(null);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -28,9 +32,18 @@ export default function ChatPanel({ apiCall, activeSectionId }) {
     if (open && inputRef.current) inputRef.current.focus();
   }, [open]);
 
+  // Tick the cooldown countdown once a second and clear it when it expires.
+  useEffect(() => {
+    if (!cooldown) return;
+    const timer = setInterval(() => {
+      setCooldown((c) => (!c || c.seconds <= 1 ? null : { ...c, seconds: c.seconds - 1 }));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [cooldown]);
+
   async function send(text) {
     const content = (text ?? input).trim();
-    if (!content || loading) return;
+    if (!content || loading || cooldown) return;
     const priorHistory = messages.slice(-10);
     setMessages((m) => [...m, { role: "user", text: content }]);
     setInput("");
@@ -46,8 +59,19 @@ export default function ChatPanel({ apiCall, activeSectionId }) {
         }),
       });
       setMessages((m) => [...m, { role: "assistant", text: data.reply }]);
-    } catch {
-      setError("Sorry, something went wrong. Please try again.");
+    } catch (err) {
+      if (err?.status === 429) {
+        setCooldown({
+          scope: err.body?.scope === "day" ? "day" : "minute",
+          seconds: Math.max(1, err.body?.retryAfterSeconds || 60),
+        });
+        // Undo the optimistic append and give the user their text back, so
+        // the transcript holds no unanswered question and nothing typed is lost.
+        setMessages((m) => m.slice(0, -1));
+        setInput(content);
+      } else {
+        setError("Sorry, something went wrong. Please try again.");
+      }
     } finally {
       setLoading(false);
     }
@@ -108,7 +132,8 @@ export default function ChatPanel({ apiCall, activeSectionId }) {
                 <button
                   key={s}
                   onClick={() => send(s)}
-                  className="block w-full text-left text-sm px-3 py-2 rounded-lg border border-[#E5E5E5] hover:border-[#E66433] hover:bg-[#FDF1EC] text-[#2A2A2A] transition-colors"
+                  disabled={loading || !!cooldown}
+                  className="block w-full text-left text-sm px-3 py-2 rounded-lg border border-[#E5E5E5] hover:border-[#E66433] hover:bg-[#FDF1EC] text-[#2A2A2A] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {s}
                 </button>
@@ -148,6 +173,14 @@ export default function ChatPanel({ apiCall, activeSectionId }) {
             {error}
           </div>
         )}
+
+        {cooldown && (
+          <div className="text-sm text-[#8A2C12] bg-[#FBE9E4] border border-[#E66433]/40 rounded-lg px-3 py-2">
+            {cooldown.scope === "day"
+              ? "You've reached today's limit for the assistant. It resets at midnight UTC."
+              : `You're sending messages quickly — you can ask again in ${cooldown.seconds}s.`}
+          </div>
+        )}
       </div>
 
       {/* Input */}
@@ -159,12 +192,13 @@ export default function ChatPanel({ apiCall, activeSectionId }) {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
             rows={1}
-            placeholder="Ask about a module..."
-            className="flex-1 resize-none max-h-28 px-3 py-2 text-sm rounded-lg border border-[#E5E5E5] focus:border-[#E66433] focus:outline-none"
+            disabled={!!cooldown}
+            placeholder={cooldown ? "The assistant is cooling down..." : "Ask about a module..."}
+            className="flex-1 resize-none max-h-28 px-3 py-2 text-sm rounded-lg border border-[#E5E5E5] focus:border-[#E66433] focus:outline-none disabled:bg-[#FAFAFA] disabled:cursor-not-allowed"
           />
           <button
             onClick={() => send()}
-            disabled={loading || !input.trim()}
+            disabled={loading || !input.trim() || !!cooldown}
             aria-label="Send message"
             className="p-2.5 rounded-lg bg-[#E66433] text-white hover:bg-[#C94F22] disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
           >
