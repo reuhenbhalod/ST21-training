@@ -602,9 +602,6 @@ useEffect(() => {
               Learn. Practice.<br />
               <span className="italic font-light">Grow with SmarTek21.</span>
             </h1>
-            <p className="text-lg text-white/90 max-w-lg leading-relaxed">
-              The SmarTek21 training hub. Self-paced courses across the company, from technical fundamentals to sales, marketing, and beyond.
-            </p>
           </div>
 
           <div className="text-xs text-white/70 flex items-center gap-2">
