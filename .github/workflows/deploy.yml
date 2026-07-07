@@ -1,0 +1,80 @@
+name: Deploy to AWS
+
+# Deploys on every push to main. Frontend (Vite -> S3 -> CloudFront) and
+# backend (SAM: Lambda + DynamoDB) are deployed together. Auth to AWS is via
+# OIDC — no stored access keys. The assumed role is scoped to this repo/branch.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Prevent overlapping deploys from racing on the same stack.
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+permissions:
+  id-token: write   # required so the job can request the GitHub OIDC token
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  STACK_NAME: smartek21-academy
+  SITE_BUCKET: smartek21-academy-site-669810405473
+  ARTIFACT_BUCKET: smartek21-academy-sam-artifacts-669810405473
+  DISTRIBUTION_ID: E3PRQZMXB4CP9
+  DEPLOY_ROLE_ARN: arn:aws:iam::669810405473:role/smartek21-academy-github-deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build   # build:kb + vite build -> dist/
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up SAM CLI
+        uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: Build backend (SAM)
+        run: sam build
+
+      - name: Deploy backend (SAM)
+        run: |
+          sam deploy \
+            --stack-name "$STACK_NAME" \
+            --region "$AWS_REGION" \
+            --s3-bucket "$ARTIFACT_BUCKET" \
+            --s3-prefix "$STACK_NAME" \
+            --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND \
+            --tags Project=smartek21-academy \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset
+
+      - name: Sync frontend to S3
+        run: aws s3 sync dist/ "s3://$SITE_BUCKET" --delete
+
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "$DISTRIBUTION_ID" \
+            --paths "/*"
