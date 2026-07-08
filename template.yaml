@@ -211,6 +211,20 @@ Resources:
             CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
             # AllViewerExceptHostHeader — forwards Authorization, drops Host
             OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+        # These make SPA deep links / refreshes work: S3+OAC returns 403 for a
+        # missing object (no s3:ListBucket granted), so a client-side route like
+        # /reading/module-3 404s at S3 and we serve index.html instead.
+        #
+        # KNOWN ARTIFACT (accepted, not a bug): CustomErrorResponses are
+        # distribution-wide, so they ALSO catch 403/404 from the /api/* Lambda
+        # origin — a legitimate 403 (e.g. non-admin hitting /api/admin-costs or
+        # /api/admin-users) is rewritten to 200 + index.html, and unknown /api
+        # routes 404 -> 200 SPA. Fails SAFE (no data leak; the UI gates admin
+        # calls behind isAdmin so this path isn't reached in normal use). Only
+        # downside is a dishonest status code for DIRECT API callers. Other
+        # statuses (401/400/503/200) pass through untouched. Proper fix if ever
+        # needed: drop these and do SPA fallback via a CloudFront Function
+        # attached to the DEFAULT (S3) behavior only, leaving /api/* untouched.
         CustomErrorResponses:
           - ErrorCode: 403
             ResponseCode: 200
