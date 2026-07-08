@@ -1530,10 +1530,13 @@ function Footer() {
 // ===========================================================================
 
 function AdminView({ apiCall, onBack }) {
-  const [view, setView] = useState("list"); // list | detail
+  const [tab, setTab] = useState("users"); // users | costs
+  const [view, setView] = useState("list"); // list | detail (within the Users tab)
   const [selectedEmail, setSelectedEmail] = useState(null);
 
-  if (view === "detail" && selectedEmail) {
+  // A user's detail page is a full-screen drill-down within the Users tab (it
+  // has its own "back" to the list), so the sub-tabs are hidden there.
+  if (tab === "users" && view === "detail" && selectedEmail) {
     return (
       <AdminUserDetail
         email={selectedEmail}
@@ -1544,11 +1547,192 @@ function AdminView({ apiCall, onBack }) {
   }
 
   return (
-    <AdminUserList
-      apiCall={apiCall}
-      onBack={onBack}
-      onSelectUser={(email) => { setSelectedEmail(email); setView("detail"); }}
-    />
+    <div>
+      <AdminTabs tab={tab} onTab={setTab} />
+      {tab === "users" ? (
+        <AdminUserList
+          apiCall={apiCall}
+          onBack={onBack}
+          onSelectUser={(email) => { setSelectedEmail(email); setView("detail"); }}
+        />
+      ) : (
+        <AdminCosts apiCall={apiCall} />
+      )}
+    </div>
+  );
+}
+
+// Segmented "Users | Costs" control at the top of the admin area, styled with
+// the admin accent tokens (#E66433 / #FDF1EC).
+function AdminTabs({ tab, onTab }) {
+  const tabs = [
+    { id: "users", label: "Users" },
+    { id: "costs", label: "Costs" },
+  ];
+  return (
+    <div className="max-w-6xl mx-auto px-6 pt-10">
+      <div className="inline-flex rounded-lg border border-[#E5E5E5] overflow-hidden">
+        {tabs.map((t) => {
+          const active = tab === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => onTab(t.id)}
+              style={{
+                padding: "0.5rem 1.25rem",
+                fontSize: "0.875rem",
+                fontWeight: 600,
+                border: "none",
+                cursor: "pointer",
+                backgroundColor: active ? "#FDF1EC" : "#FFFFFF",
+                color: active ? "#E66433" : "#4A4A4A",
+              }}
+            >
+              {t.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Admin cost dashboard — total + per-service breakdown + daily trend for the
+// ST21 project, from /api/admin-costs (AWS Cost Explorer, tag-filtered). A 503
+// (cost_data_unavailable) degrades to a clear message rather than a raw error;
+// an all-$0 result is a valid state (tags apply going forward, ~24h lag).
+function AdminCosts({ apiCall }) {
+  const [range, setRange] = useState("mtd"); // mtd | last30d
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null); // { unavailable, message } | null
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const result = await apiCall(`/api/admin-costs?range=${range}`);
+        if (!cancelled) setData(result);
+      } catch (err) {
+        console.error("admin-costs fetch failed:", err);
+        if (!cancelled) {
+          const unavailable = err.status === 503 || err.body?.error === "cost_data_unavailable";
+          setError(unavailable
+            ? { unavailable: true, message: "Cost data is temporarily unavailable. Please try again shortly." }
+            : { unavailable: false, message: err.message || "Failed to load costs" });
+          setData(null);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [apiCall, range]);
+
+  const fmt = (n) => `$${(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const rangeLabel = range === "mtd" ? "month to date" : "last 30 days";
+  const isEmpty = data && data.total === 0 && (data.byService?.length || 0) === 0;
+  const trendMax = data?.trend?.length ? Math.max(...data.trend.map((t) => t.amount), 0) : 0;
+
+  return (
+    <div className="max-w-6xl mx-auto px-6 py-12">
+      <div className="mb-8">
+        <div className="flex items-center gap-2 mb-3">
+          <div className="w-1 h-4 bg-[#E66433]" />
+          <div className="text-xs uppercase tracking-[0.25em] text-[#E66433] font-semibold">Admin</div>
+        </div>
+        <h1 className="text-4xl font-bold text-[#1A1A1A] mb-2 tracking-tight">Hosting costs</h1>
+        <p className="text-[#4A4A4A]">
+          AWS spend for the ST21 Academy (resources tagged{" "}
+          <span style={{ fontFamily: "monospace", fontSize: "0.85em", backgroundColor: "#F3F3F3", padding: "0.05rem 0.3rem", borderRadius: "3px" }}>Project=smartek21-academy</span>).
+          Figures come from AWS Cost Explorer and refresh a few times a day.
+        </p>
+      </div>
+
+      <div className="inline-flex rounded-lg border border-[#E5E5E5] overflow-hidden mb-8">
+        {[{ id: "mtd", label: "Month to date" }, { id: "last30d", label: "Last 30 days" }].map((r) => {
+          const active = range === r.id;
+          return (
+            <button
+              key={r.id}
+              onClick={() => setRange(r.id)}
+              style={{ padding: "0.4rem 1rem", fontSize: "0.8rem", fontWeight: 600, border: "none", cursor: "pointer", backgroundColor: active ? "#FDF1EC" : "#FFFFFF", color: active ? "#E66433" : "#4A4A4A" }}
+            >
+              {r.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {loading && <div className="text-center py-16 text-[#4A4A4A]">Loading costs…</div>}
+
+      {error && (
+        <div className="p-4 rounded-md bg-red-50 border border-red-200 text-sm text-red-900">
+          <strong>{error.unavailable ? "Temporarily unavailable:" : "Error:"}</strong> {error.message}
+        </div>
+      )}
+
+      {!loading && !error && data && (
+        <>
+          <div className="bg-white border border-[#E5E5E5] rounded-lg p-6 mb-8 flex items-baseline justify-between">
+            <div>
+              <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.1em", color: "#767676", fontWeight: 600, marginBottom: "0.25rem" }}>Total ({rangeLabel})</div>
+              <div className="text-4xl font-bold text-[#1A1A1A] tabular-nums">{fmt(data.total)}</div>
+            </div>
+            <div className="text-xs text-[#767676] text-right">
+              {data.cached ? "cached" : "live"} · as of {formatRelativeDate(data.asOf)}
+            </div>
+          </div>
+
+          {isEmpty && (
+            <div className="p-4 mb-8 rounded-md bg-[#FDF1EC] border border-[#F3D9CC] text-sm text-[#8A4B2E]">
+              No tagged costs recorded for this period yet. Cost-allocation tags apply going forward and can take up to ~24h to appear, so this may read $0.00 until spend accrues.
+            </div>
+          )}
+
+          {data.byService?.length > 0 && (
+            <div className="bg-white border border-[#E5E5E5] rounded-lg overflow-hidden mb-8">
+              <table className="w-full">
+                <thead style={{ backgroundColor: "#FAFAFA", borderBottom: "1px solid #E5E5E5" }}>
+                  <tr><Th>Service</Th><Th>Cost</Th><Th>Share</Th></tr>
+                </thead>
+                <tbody>
+                  {data.byService.map((s) => (
+                    <tr key={s.service} style={{ borderBottom: "1px solid #F3F3F3" }}>
+                      <Td><span className="font-semibold text-[#1A1A1A]">{s.service}</span></Td>
+                      <Td><span className="tabular-nums text-[#1A1A1A]">{fmt(s.amount)}</span></Td>
+                      <Td><span className="tabular-nums text-[#767676]">{data.total > 0 ? Math.round((s.amount / data.total) * 100) : 0}%</span></Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {data.trend?.length > 0 && (
+            <div className="bg-white border border-[#E5E5E5] rounded-lg p-6">
+              <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.1em", color: "#767676", fontWeight: 600, marginBottom: "1rem" }}>Daily trend</div>
+              <div className="flex items-end gap-1" style={{ height: "120px" }}>
+                {data.trend.map((t) => {
+                  const h = trendMax > 0 ? Math.max(2, (t.amount / trendMax) * 100) : 2;
+                  return (
+                    <div key={t.date} title={`${t.date}: ${fmt(t.amount)}`} style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "flex-end", height: "100%" }}>
+                      <div style={{ height: `${h}%`, backgroundColor: "#E66433", borderRadius: "2px 2px 0 0", minHeight: "2px" }} />
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex justify-between mt-2" style={{ fontSize: "0.65rem", color: "#767676" }}>
+                <span>{data.trend[0]?.date}</span>
+                <span>{data.trend[data.trend.length - 1]?.date}</span>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 

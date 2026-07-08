@@ -114,6 +114,15 @@ Resources:
               Resource:
                 - !Sub "arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0"
                 - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*amazon.nova-lite-v1:0"
+        # Cost Explorer for the admin cost dashboard (/api/admin-costs). CE has
+        # no resource-level scoping, so Resource must be "*". Read-only actions.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ce:GetCostAndUsage
+                - ce:GetCostForecast
+                - ce:GetDimensionValues
+              Resource: "*"
       FunctionUrlConfig:
         AuthType: NONE
         Cors:

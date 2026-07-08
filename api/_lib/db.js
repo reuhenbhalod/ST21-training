@@ -266,6 +266,49 @@ export async function consumeRateLimit(email, bucket, windowId, limit, expiresAt
 }
 
 // --------------------------------------------------------------------------
+// Cost dashboard cache — one shaped Cost Explorer payload per range, stored
+// under a fixed system partition (PK=SYSTEM#costs, SK=COST#<range>). Cost data
+// is global (not per-user), so a single blob per range serves every admin. A
+// numeric expires_at gives it a short TTL (default 6h) so repeated dashboard
+// views are served from DynamoDB instead of re-hitting the metered, slow Cost
+// Explorer API. Expired blobs are GC'd lazily by the table's TTL; we also guard
+// against reading a logically-expired one below.
+// --------------------------------------------------------------------------
+
+const COST_CACHE_PK = "SYSTEM#costs";
+const COST_PREFIX = "COST#";
+
+// Read the cached payload for a range, or null on a miss (absent or expired).
+export async function getCachedCosts(range) {
+  const { Item } = await doc().send(
+    new GetCommand({
+      TableName: TABLE,
+      Key: { PK: COST_CACHE_PK, SK: `${COST_PREFIX}${range}` },
+    })
+  );
+  if (!Item) return null;
+  // TTL deletion is lazy, so a logically-expired blob may still be present.
+  if (Item.expires_at && Item.expires_at < Math.floor(Date.now() / 1000)) return null;
+  return Item.payload || null;
+}
+
+// Cache a shaped payload for a range with a TTL (default 6h). expires_at is a
+// numeric epoch-seconds value, matching the table's TTL attribute convention.
+export async function putCachedCosts(range, payload, ttlSeconds = 6 * 3600) {
+  await doc().send(
+    new PutCommand({
+      TableName: TABLE,
+      Item: {
+        PK: COST_CACHE_PK,
+        SK: `${COST_PREFIX}${range}`,
+        payload,
+        expires_at: Math.floor(Date.now() / 1000) + ttlSeconds,
+      },
+    })
+  );
+}
+
+// --------------------------------------------------------------------------
 // Health — a cheap round-trip that proves IAM + connectivity to the table.
 // --------------------------------------------------------------------------
 
