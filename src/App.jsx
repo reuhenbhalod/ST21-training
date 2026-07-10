@@ -131,7 +131,9 @@ function generateQuizAttempt(pool) {
 // ===========================================================================
 
 export default function SmarTek21Academy() {
-  const [authState, setAuthState] = useState("login"); // login | authed
+  const [authState, setAuthState] = useState("restoring"); // restoring | login | authed
+  // Surfaced on the login screen when a redirect returns a non-company account.
+  const [loginError, setLoginError] = useState("");
   const [user, setUser] = useState(null);
   const [accessToken, setAccessToken] = useState(null); // Microsoft token for API calls
   // Mirror of accessToken so getFreshToken can read the cached token without
@@ -235,6 +237,44 @@ export default function SmarTek21Academy() {
   // EFFECTS: load progress on login, fire heartbeat once on login
   // ----------------------------------------------------------------------
 
+  // Restore an existing session on page load (this is what survives a refresh).
+  // React state is wiped on every load, but MSAL still has the account cached in
+  // sessionStorage, so we rehydrate from it instead of dropping the user back on
+  // the login screen. Two paths: (A) we just came back from a login redirect, or
+  // (B) a prior session is still cached and we can silently re-acquire a token.
+  useEffect(() => {
+    (async () => {
+      try {
+        await msalReady;
+        // (A) Returning from a Microsoft login redirect.
+        const redirect = await msalInstance.handleRedirectPromise();
+        if (redirect?.account) {
+          finishLogin(redirect.account.username, redirect.accessToken);
+          return;
+        }
+        // (B) No redirect in flight — restore a cached session if one exists.
+        // acquireTokenSilent returns the cached token or transparently mints a
+        // fresh one via the refresh token; no popup or redirect is shown.
+        const accounts = msalInstance.getAllAccounts();
+        if (accounts.length > 0) {
+          const result = await msalInstance.acquireTokenSilent({
+            scopes: MSAL_SCOPES,
+            account: accounts[0]
+          });
+          finishLogin(accounts[0].username, result.accessToken);
+          return;
+        }
+        // Nobody is signed in.
+        setAuthState("login");
+      } catch (err) {
+        // A failed silent restore just means the user signs in again.
+        console.warn("Session restore failed:", err);
+        setAuthState("login");
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Heartbeat once on login: marks user as seen, gets isAdmin flag
   useEffect(() => {
     if (!user?.email || !accessToken) return;
@@ -332,19 +372,23 @@ export default function SmarTek21Academy() {
 
   // --- AUTH HANDLERS ----------------------------------------------------
 
-  function attemptLogin(rawEmail, token) {
-    const email = rawEmail.trim().toLowerCase();
-    if (!email) return { error: "Enter your work email to continue." };
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      return { error: "That does not look like a valid email address." };
-    }
+  // Commit a verified Microsoft identity into React state. Shared by the two
+  // ways a session comes to life: returning from a login redirect, and silently
+  // restoring an existing MSAL session on page load (e.g. after a refresh).
+  // Sends the user back to the login screen (with an error) for a non-company
+  // account rather than authing them.
+  function finishLogin(rawEmail, token) {
+    const email = (rawEmail || "").trim().toLowerCase();
     if (!email.endsWith(`@${MSAL_CONFIG.domain}`)) {
-      return { error: `Use your @${MSAL_CONFIG.domain} Microsoft work account to sign in.` };
+      setLoginError(`Use your @${MSAL_CONFIG.domain} Microsoft work account to sign in.`);
+      setAuthState("login");
+      return false;
     }
+    setLoginError("");
     setUser({ email, ...parseEmail(email) });
     setAccessToken(token || null);
     setAuthState("authed");
-    return { error: null };
+    return true;
   }
 
   function handleLogout() {
@@ -426,7 +470,8 @@ export default function SmarTek21Academy() {
 
   // --- ROUTING ---------------------------------------------------------
 
-  if (authState === "login") return <Login onAttempt={attemptLogin} />;
+  if (authState === "restoring") return <RestoringScreen />;
+  if (authState === "login") return <Login initialError={loginError} />;
 
   return (
     <div className="min-h-screen bg-[#FAFAFA] text-[#1A1A1A]" style={{ fontFamily: "ui-sans-serif, system-ui, -apple-system, sans-serif" }}>
@@ -528,11 +573,30 @@ export default function SmarTek21Academy() {
 }
 
 // ===========================================================================
+// RESTORING  — shown briefly on load while we rehydrate a cached session,
+// so a returning user never flashes the login screen on refresh.
+// ===========================================================================
+
+function RestoringScreen() {
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-center bg-white gap-4">
+      <img src={LOGO_SRC} alt="SmarTek21" className="h-10 w-auto" />
+      <div className="flex items-center gap-2 text-sm text-[#767676]">
+        <RefreshCw className="w-4 h-4 animate-spin text-[#E66433]" />
+        Restoring your session...
+      </div>
+    </div>
+  );
+}
+
+// ===========================================================================
 // LOGIN  (Microsoft Entra ID)
 // ===========================================================================
 
-function Login({ onAttempt }) {
-  const [error, setError] = useState("");
+function Login({ initialError = "" }) {
+  // Seed from initialError so a rejected redirect (e.g. wrong domain) that the
+  // root component detected is shown here on the login screen.
+  const [error, setError] = useState(initialError);
   const [loading, setLoading] = useState(false);
 
   // Trigger the real Microsoft sign-in popup.
@@ -556,34 +620,9 @@ function Login({ onAttempt }) {
   }
 }
 
-// On page load, check if we are returning from a Microsoft redirect.
-// This runs once when the Login component mounts.
-useEffect(() => {
-    (async () => {
-      try {
-        await msalReady;
-        const response = await msalInstance.handleRedirectPromise();
-        if (response && response.account) {
-          const signedInEmail = (response.account.username || "").toLowerCase();
-          if (!signedInEmail.endsWith(`@${MSAL_CONFIG.domain}`)) {
-            setError(`Use your @${MSAL_CONFIG.domain} Microsoft work account to sign in.`);
-            return;
-          }
-          // Pass the access token up so the parent can call our API
-          onAttempt(signedInEmail, response.accessToken);
-        }
-      } catch (err) {
-        console.error("MSAL redirect error:", err);
-        setError("Sign-in failed. Please try again.");
-      }
-    })();
-  }, []);
-
-  // The simulated dialog's Next button is no longer used, but we keep the
-  // handler so the dialog code doesn't break if it stays in the tree.
-  function handleSubmit() {
-    openDialog();
-  }
+// Returning from a Microsoft redirect is now handled once at the root component
+// (see the session-restore effect), which also covers plain refreshes. Login is
+// purely the sign-in screen.
 
   return (
     <div className="min-h-screen flex bg-white" style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
