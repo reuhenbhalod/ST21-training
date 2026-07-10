@@ -28,9 +28,10 @@ Parameters:
     Type: String
     Default: "us.amazon.nova-lite-v1:0"
     Description: >
-      Bedrock model / inference-profile id used by /api/chat. Amazon Nova Lite.
-      Confirm the exact invocable id in the Bedrock console after enabling model
-      access (the base model id is amazon.nova-lite-v1:0).
+      Source (system) inference-profile id that the tagged application inference
+      profile copies from. Amazon Nova Lite, cross-region (us.). /api/chat does
+      NOT invoke this directly — it invokes the application inference profile
+      built from it (see NovaLiteInferenceProfile) so spend is cost-attributed.
   ChatRateLimitPerMinute:
     Type: Number
     Default: 10
@@ -86,6 +87,26 @@ Resources:
         Enabled: true
 
   # ---------------------------------------------------------------------------
+  # Bedrock application inference profile — a TAGGABLE wrapper around the Nova
+  # Lite cross-region (system) inference profile. On-demand model usage has no
+  # resource to tag, so its cost is invisible to the Project=smartek21-academy
+  # cost-allocation filter used by the admin cost dashboard. Invoking /api/chat
+  # through this tagged profile instead attributes the token spend to ST21, so
+  # it finally shows up as an "Amazon Bedrock" line in the dashboard.
+  # NOTE: attribution is not retroactive and Cost Explorer lags ~24-48h.
+  # ---------------------------------------------------------------------------
+  NovaLiteInferenceProfile:
+    Type: AWS::Bedrock::ApplicationInferenceProfile
+    Properties:
+      InferenceProfileName: smartek21-academy-nova-lite
+      Description: Tagged Nova Lite profile for chat cost attribution
+      ModelSource:
+        CopyFrom: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}"
+      Tags:
+        - Key: Project
+          Value: smartek21-academy
+
+  # ---------------------------------------------------------------------------
   # API — one Lambda, all 7 routes, exposed via a Function URL.
   # /api/chat calls Amazon Nova Lite via Bedrock. Guardrails are handled in
   # code (topic-classifier pre-check + system-prompt grounding), so no Bedrock
@@ -102,7 +123,10 @@ Resources:
         Variables:
           TABLE_NAME: !Ref Table
           ALLOWED_ORIGIN: !Ref AllowedOrigin
-          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          # Invoke via the tagged application inference profile (its ARN), not the
+          # raw model id, so Bedrock spend carries the Project tag. chat.js reads
+          # this value straight into ConverseCommand.modelId — no code change.
+          BEDROCK_MODEL_ID: !GetAtt NovaLiteInferenceProfile.InferenceProfileArn
           CHAT_RATE_LIMIT_PER_MINUTE: !Ref ChatRateLimitPerMinute
           CHAT_RATE_LIMIT_PER_DAY: !Ref ChatRateLimitPerDay
       Policies:
@@ -112,6 +136,10 @@ Resources:
             - Effect: Allow
               Action: bedrock:InvokeModel
               Resource:
+                # Invoking through the application inference profile needs
+                # InvokeModel on BOTH the profile ARN and the model(s) it routes
+                # to (all regions the cross-region system profile spans).
+                - !GetAtt NovaLiteInferenceProfile.InferenceProfileArn
                 - !Sub "arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0"
                 - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*amazon.nova-lite-v1:0"
         # Cost Explorer for the admin cost dashboard (/api/admin-costs). CE has

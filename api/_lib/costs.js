@@ -100,8 +100,16 @@ export async function fetchCosts(range, now = new Date()) {
     .filter((s) => s.amount > 0)
     .sort((a, b) => b.amount - a.amount);
 
-  // Total from the rounded service amounts so the breakdown always sums to it.
-  const total = cents(byService.reduce((sum, s) => sum + s.amount, 0));
+  // Total from the RAW per-service amounts, rounding only once at the end.
+  // Rounding each service to a cent first and summing THOSE dropped every
+  // sub-cent service (each rounds to 0.00 and is filtered out), which zeroed the
+  // headline total for low-traffic months even when real spend existed. Summing
+  // raw first keeps a handful of sub-cent services adding up to a visible figure.
+  // (Consequence: the breakdown table — which omits services under $0.005 — may
+  // not sum exactly to this total. That's expected and correct.)
+  const total = cents(
+    [...byServiceRaw.values()].reduce((sum, amount) => sum + amount, 0)
+  );
 
   const trend = (daily.ResultsByTime || [])
     .map((period) => {
