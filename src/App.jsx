@@ -7,6 +7,7 @@ import {
   AlertCircle, ChevronRight, Circle, PlayCircle, RefreshCw
 } from "lucide-react";
 import { COURSE } from "./courseData.jsx";
+import { FINAL_EXAM } from "./finalExam.js";
 import ChatPanel from "./ChatPanel.jsx";
 
 // ---------------------------------------------------------------------------
@@ -123,6 +124,72 @@ function generateQuizAttempt(pool) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// FINAL EXAM — comprehensive 20-question capstone, graded and stored entirely
+// in the browser (no server). Unlocks once every module is passed.
+// ---------------------------------------------------------------------------
+
+const EXAM_QUESTION_COUNT = 20;
+const EXAM_PASS_THRESHOLD = 0.9;              // 18/20 to pass
+const EXAM_PASS_COUNT = Math.ceil(EXAM_PASS_THRESHOLD * EXAM_QUESTION_COUNT); // 18
+
+// Build a fresh 20-question attempt from the pool, excluding the questions
+// served in the previous (submitted) attempt so a retake differs. Shuffles the
+// picked questions and the options within each (remapping correct), mirroring
+// generateQuizAttempt. Carries `id` through so the served set can be recorded.
+function generateExamAttempt(pool, excludeIds = []) {
+  const exclude = new Set(excludeIds);
+  let candidates = pool.filter(q => !exclude.has(q.id));
+  // Defensive: if exclusion leaves fewer than a full exam (pool < 2x count),
+  // top up from the excluded set so we always serve EXAM_QUESTION_COUNT.
+  if (candidates.length < EXAM_QUESTION_COUNT) {
+    candidates = candidates.concat(shuffle(pool.filter(q => exclude.has(q.id))));
+  }
+  const picked = shuffle(candidates).slice(0, EXAM_QUESTION_COUNT);
+  return picked.map(q => {
+    const indexed = q.options.map((opt, i) => ({ opt, isCorrect: i === q.correct }));
+    const shuffled = shuffle(indexed);
+    return {
+      id: q.id,
+      q: q.q,
+      options: shuffled.map(x => x.opt),
+      correct: shuffled.findIndex(x => x.isCorrect),
+      why: q.why
+    };
+  });
+}
+
+// Browser-only exam state, keyed by user email so accounts on a shared machine
+// stay separate. Nothing here is sent to the server or visible to admins.
+const EXAM_STORE_PREFIX = "st21-final-exam:";
+const EMPTY_EXAM_STATE = {
+  passed: false,
+  bestScore: 0,       // 0..1, highest ever
+  lastScore: 0,       // most recent attempt
+  attemptsCount: 0,
+  lastServedIds: [],  // question ids from the most recent submitted attempt
+  passedAt: null      // ISO timestamp of first pass (for the certificate)
+};
+
+function readExamState(email) {
+  if (!email || typeof localStorage === "undefined") return { ...EMPTY_EXAM_STATE };
+  try {
+    const raw = localStorage.getItem(EXAM_STORE_PREFIX + email.toLowerCase());
+    return raw ? { ...EMPTY_EXAM_STATE, ...JSON.parse(raw) } : { ...EMPTY_EXAM_STATE };
+  } catch {
+    return { ...EMPTY_EXAM_STATE };
+  }
+}
+
+function writeExamState(email, state) {
+  if (!email || typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(EXAM_STORE_PREFIX + email.toLowerCase(), JSON.stringify(state));
+  } catch {
+    // Storage full or blocked — non-fatal; exam progress just won't persist.
+  }
+}
+
 
 
 
@@ -149,6 +216,10 @@ export default function SmarTek21Academy() {
   const progressRef = useRef({});
   const [quizState, setQuizState] = useState({ questions: [], answers: {}, submitted: false });
 
+  // Final exam: the in-progress attempt, plus the persisted (browser-only) state.
+  const [examAttempt, setExamAttempt] = useState({ questions: [], answers: {}, submitted: false });
+  const [examState, setExamState] = useState(EMPTY_EXAM_STATE);
+
   // API state
   const [progressLoading, setProgressLoading] = useState(false);
   const [apiError, setApiError] = useState(null);
@@ -171,6 +242,11 @@ export default function SmarTek21Academy() {
 
   // Keep progressRef in sync so saveProgress can merge against the latest value.
   useEffect(() => { progressRef.current = progress; }, [progress]);
+
+  // Load the browser-stored final-exam state whenever the signed-in user changes.
+  useEffect(() => {
+    setExamState(user?.email ? readExamState(user.email) : EMPTY_EXAM_STATE);
+  }, [user?.email]);
 
   const getFreshToken = useCallback(async ({ forceRefresh = false } = {}) => {
     // Always go through MSAL. acquireTokenSilent returns the cached token while
@@ -369,6 +445,8 @@ export default function SmarTek21Academy() {
   const completedCount = Object.values(progress).filter(p => p.passed).length;
   const totalCount = COURSE.length;
   const overallPercent = Math.round((completedCount / totalCount) * 100);
+  // The final exam unlocks only once every module has been passed.
+  const allModulesPassed = totalCount > 0 && completedCount === totalCount;
 
   // --- AUTH HANDLERS ----------------------------------------------------
 
@@ -410,6 +488,8 @@ export default function SmarTek21Academy() {
     setSaveError(false);
     setApiError(null);
     setQuizState({ questions: [], answers: {}, submitted: false });
+    setExamAttempt({ questions: [], answers: {}, submitted: false });
+    setExamState(EMPTY_EXAM_STATE);
   }
 
   // --- NAVIGATION HANDLERS ---------------------------------------------
@@ -468,6 +548,45 @@ export default function SmarTek21Academy() {
     if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
+  // --- FINAL EXAM HANDLERS ---------------------------------------------
+
+  function startExam() {
+    // Guard: the exam is only reachable once all modules are passed.
+    if (!allModulesPassed) return;
+    setExamAttempt({
+      questions: generateExamAttempt(FINAL_EXAM, examState.lastServedIds),
+      answers: {},
+      submitted: false
+    });
+    setView("exam");
+    scrollToTop();
+  }
+
+  function submitExam() {
+    const questions = examAttempt.questions;
+    const total = questions.length;
+    const correct = questions.reduce((acc, q, i) => acc + (examAttempt.answers[i] === q.correct ? 1 : 0), 0);
+    const score = total ? correct / total : 0;
+    const passed = score >= EXAM_PASS_THRESHOLD;
+    const now = new Date().toISOString();
+
+    // Merge into the persisted state: bestScore never drops, passed is sticky,
+    // lastServedIds drives the next retake's exclusion.
+    const nextState = {
+      passed: examState.passed || passed,
+      bestScore: Math.max(examState.bestScore || 0, score),
+      lastScore: score,
+      attemptsCount: (examState.attemptsCount || 0) + 1,
+      lastServedIds: questions.map(q => q.id),
+      passedAt: examState.passedAt || (passed ? now : null)
+    };
+    setExamState(nextState);
+    if (user?.email) writeExamState(user.email, nextState);
+
+    setExamAttempt(a => ({ ...a, submitted: true }));
+    if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
   // --- ROUTING ---------------------------------------------------------
 
   if (authState === "restoring") return <RestoringScreen />;
@@ -522,6 +641,10 @@ export default function SmarTek21Academy() {
           user={user}
           isAdmin={isAdmin}
           onOpenAdmin={() => setView("admin")}
+          allModulesPassed={allModulesPassed}
+          examState={examState}
+          onStartExam={startExam}
+          onViewCertificate={() => { setView("certificate"); scrollToTop(); }}
         />
       )}
 
@@ -548,6 +671,26 @@ export default function SmarTek21Academy() {
             if (next) openReading(next.id);
             else { setView("dashboard"); setActiveSectionId(null); scrollToTop(); }
           }}
+        />
+      )}
+
+      {view === "exam" && allModulesPassed && (
+        <FinalExam
+          attempt={examAttempt}
+          alreadyPassed={examState.passed}
+          onAnswer={(qi, ai) => setExamAttempt(s => ({ ...s, answers: { ...s.answers, [qi]: ai } }))}
+          onSubmit={submitExam}
+          onBack={() => { setView("dashboard"); scrollToTop(); }}
+          onRetake={startExam}
+          onViewCertificate={() => { setView("certificate"); scrollToTop(); }}
+        />
+      )}
+
+      {view === "certificate" && examState.passed && (
+        <Certificate
+          user={user}
+          examState={examState}
+          onBack={() => { setView("dashboard"); scrollToTop(); }}
         />
       )}
 
@@ -792,7 +935,7 @@ function TopNav({ user, onLogout, onHome, overallPercent, isAdmin, isAdminView, 
 // DASHBOARD
 // ===========================================================================
 
-function Dashboard({ progress, overallPercent, completedCount, totalCount, onOpen, user }) {
+function Dashboard({ progress, overallPercent, completedCount, totalCount, onOpen, user, allModulesPassed, examState, onStartExam, onViewCertificate }) {
   const firstName = user.firstName;
 
   return (
@@ -806,7 +949,7 @@ function Dashboard({ progress, overallPercent, completedCount, totalCount, onOpe
           Welcome back, {firstName}.
         </h1>
         <p className="text-lg text-[#4A4A4A] max-w-2xl leading-relaxed">
-          Work through each module at your own pace. Read the material, pass the quiz, then move to the next. Score 100% on every quiz to earn your completion badge.
+          Work through each module at your own pace. Read the material, pass the quiz, then move to the next. Pass all modules to unlock the final exam and earn your certificate.
         </p>
       </div>
 
@@ -815,9 +958,9 @@ function Dashboard({ progress, overallPercent, completedCount, totalCount, onOpe
         <StatCard label="Overall progress" value={`${overallPercent}%`} icon={TrendingUp} />
         <StatCard
           label="Status"
-          value={overallPercent === 100 ? "Certified" : "In progress"}
-          icon={overallPercent === 100 ? Trophy : PlayCircle}
-          highlight={overallPercent === 100}
+          value={examState?.passed ? "Certified" : allModulesPassed ? "Exam ready" : "In progress"}
+          icon={examState?.passed ? Trophy : PlayCircle}
+          highlight={!!examState?.passed}
         />
       </div>
 
@@ -849,20 +992,88 @@ function Dashboard({ progress, overallPercent, completedCount, totalCount, onOpe
         })}
       </div>
 
-      {overallPercent === 100 && (
-        <div className="mt-12 p-8 rounded-lg bg-[#E66433] text-white relative overflow-hidden">
-          <div className="absolute -top-20 -right-20 w-64 h-64 rounded-full bg-white/10" />
-          <div className="relative flex items-start gap-4">
-            <div className="w-14 h-14 rounded-full bg-white flex items-center justify-center flex-shrink-0">
-              <Trophy className="w-7 h-7 text-[#E66433]" />
-            </div>
-            <div>
-              <h3 className="text-2xl font-bold mb-1 tracking-tight">Course complete.</h3>
-              <p className="text-white/90 leading-relaxed">You have passed every module. Share this achievement with your manager and put what you learned to use.</p>
-            </div>
+      <FinalExamCard
+        unlocked={allModulesPassed}
+        totalCount={totalCount}
+        examState={examState}
+        onStart={onStartExam}
+        onViewCertificate={onViewCertificate}
+      />
+    </div>
+  );
+}
+
+// Capstone card at the bottom of the dashboard: locked until every module is
+// passed, then the entry point to take the final exam or view the certificate.
+function FinalExamCard({ unlocked, totalCount, examState, onStart, onViewCertificate }) {
+  const passed = !!examState?.passed;
+  const attempts = examState?.attemptsCount || 0;
+  const bestPct = Math.round((examState?.bestScore || 0) * 100);
+  const passPct = Math.round(EXAM_PASS_THRESHOLD * 100);
+
+  if (passed) {
+    return (
+      <div className="mt-12 p-8 rounded-lg bg-[#16A34A] text-white relative overflow-hidden">
+        <div className="absolute -top-20 -right-20 w-64 h-64 rounded-full bg-white/10" />
+        <div className="relative flex items-start gap-4 flex-wrap">
+          <div className="w-14 h-14 rounded-full bg-white flex items-center justify-center flex-shrink-0">
+            <Trophy className="w-7 h-7 text-[#16A34A]" />
+          </div>
+          <div className="flex-1 min-w-[220px]">
+            <h3 className="text-2xl font-bold mb-1 tracking-tight">You're certified.</h3>
+            <p className="text-white/90 leading-relaxed">You passed the SmarTek21 Academy final exam with a best score of {bestPct}%.</p>
+          </div>
+          <div className="flex gap-3 flex-wrap">
+            <button onClick={onViewCertificate} className="px-5 py-3 rounded-md bg-white text-[#16A34A] font-bold hover:bg-white/90 transition inline-flex items-center gap-2">
+              <Trophy className="w-4 h-4" /> View certificate
+            </button>
+            <button onClick={onStart} className="px-5 py-3 rounded-md border border-white/60 text-white font-semibold hover:bg-white/10 transition inline-flex items-center gap-2">
+              <RefreshCw className="w-4 h-4" /> Retake
+            </button>
           </div>
         </div>
-      )}
+      </div>
+    );
+  }
+
+  if (unlocked) {
+    return (
+      <div className="mt-12 p-8 rounded-lg bg-[#E66433] text-white relative overflow-hidden">
+        <div className="absolute -top-20 -right-20 w-64 h-64 rounded-full bg-white/10" />
+        <div className="relative flex items-start gap-4 flex-wrap">
+          <div className="w-14 h-14 rounded-full bg-white flex items-center justify-center flex-shrink-0">
+            <ClipboardCheck className="w-7 h-7 text-[#E66433]" />
+          </div>
+          <div className="flex-1 min-w-[220px]">
+            <h3 className="text-2xl font-bold mb-1 tracking-tight">Final exam unlocked.</h3>
+            <p className="text-white/90 leading-relaxed">
+              {EXAM_QUESTION_COUNT} questions across every module. Score {EXAM_PASS_COUNT}/{EXAM_QUESTION_COUNT} ({passPct}%) or higher to earn your certificate.
+              {attempts > 0 && ` Your best so far is ${bestPct}%.`}
+            </p>
+          </div>
+          <button onClick={onStart} className="px-6 py-3 rounded-md bg-white text-[#E66433] font-bold hover:bg-white/90 transition inline-flex items-center gap-2 self-center">
+            {attempts > 0
+              ? <><RefreshCw className="w-4 h-4" /> Retake exam</>
+              : <>Start final exam <ArrowRight className="w-4 h-4" /></>}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-12 p-8 rounded-lg bg-[#FAFAFA] border border-[#E5E5E5]">
+      <div className="flex items-start gap-4">
+        <div className="w-14 h-14 rounded-full bg-[#F3F3F3] flex items-center justify-center flex-shrink-0">
+          <Lock className="w-6 h-6 text-[#767676]" />
+        </div>
+        <div>
+          <h3 className="text-2xl font-bold mb-1 tracking-tight text-[#1A1A1A]">Final exam</h3>
+          <p className="text-[#4A4A4A] leading-relaxed">
+            A comprehensive {EXAM_QUESTION_COUNT}-question exam across all {totalCount} modules. Pass every module to unlock it, then score {passPct}% or higher to earn your certificate.
+          </p>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1541,6 +1752,255 @@ function Quiz({ section, quizState, onAnswer, onSubmit, onBack, onRetry, onNext 
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ===========================================================================
+// FINAL EXAM  (20-question capstone; graded and stored in the browser)
+// ===========================================================================
+
+function FinalExam({ attempt, alreadyPassed, onAnswer, onSubmit, onBack, onRetake, onViewCertificate }) {
+  const questions = attempt.questions;
+  const answeredCount = Object.keys(attempt.answers).length;
+  const totalCount = questions.length;
+  const canSubmit = answeredCount === totalCount && totalCount > 0;
+  const submitted = attempt.submitted;
+
+  const correct = questions.reduce((acc, q, i) => acc + (attempt.answers[i] === q.correct ? 1 : 0), 0);
+  const pct = totalCount ? Math.round((correct / totalCount) * 100) : 0;
+  const passed = totalCount ? correct / totalCount >= EXAM_PASS_THRESHOLD : false;
+  const showCertificate = passed || alreadyPassed;
+
+  return (
+    <div className="max-w-3xl mx-auto px-6 py-10">
+      <button onClick={onBack} className="text-sm text-[#4A4A4A] hover:text-[#E66433] flex items-center gap-1.5 mb-8 transition">
+        <ArrowLeft className="w-4 h-4" /> Back to dashboard
+      </button>
+
+      {!submitted ? (
+        <div className="mb-8">
+          <div className="text-xs uppercase tracking-[0.2em] text-[#E66433] font-semibold mb-2">Final Exam</div>
+          <h1 className="text-3xl md:text-4xl font-bold text-[#1A1A1A] mb-3 tracking-tight">Comprehensive Assessment</h1>
+          <p className="text-[#4A4A4A]">
+            Answer all {totalCount} questions. You need {EXAM_PASS_COUNT}/{totalCount} ({Math.round(EXAM_PASS_THRESHOLD * 100)}%) to pass. Questions are drawn from every module, randomized, and differ from your last attempt.
+          </p>
+        </div>
+      ) : (
+        <div style={{ marginBottom: "2.5rem", paddingBottom: "2rem", borderBottom: "1px solid #E5E5E5", textAlign: "center" }}>
+          <div style={{ fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.25em", color: "#767676", fontWeight: 600, marginBottom: "0.75rem" }}>
+            Final Exam Results
+          </div>
+          <div style={{ fontSize: "5rem", fontWeight: 800, color: "#1A1A1A", lineHeight: 1, marginBottom: "0.5rem", fontVariantNumeric: "tabular-nums" }}>
+            {pct}%
+          </div>
+          <div style={{ fontSize: "2.5rem", fontWeight: 900, color: passed ? "#16A34A" : "#DC2626", letterSpacing: "0.15em", marginBottom: "0.75rem" }}>
+            {passed ? "PASS" : "FAIL"}
+          </div>
+          <div style={{ fontSize: "0.95rem", color: "#4A4A4A" }}>
+            {correct} of {totalCount} correct
+            {passed
+              ? " · certificate earned"
+              : `${alreadyPassed ? "" : ` · ${EXAM_PASS_COUNT}/${totalCount} required`} · new questions on retake`}
+          </div>
+        </div>
+      )}
+
+      {!submitted && (
+        <div className="bg-white py-3 mb-6 rounded-lg border border-[#E5E5E5] px-4">
+          <div className="flex items-center justify-between gap-4">
+            <div className="text-sm text-[#4A4A4A] tabular-nums">{answeredCount} / {totalCount} answered</div>
+            <div className="flex-1 h-1.5 bg-[#E5E5E5] rounded-full overflow-hidden max-w-xs">
+              <div className="h-full bg-[#E66433] transition-all" style={{ width: `${totalCount ? (answeredCount / totalCount) * 100 : 0}%` }} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-6">
+        {questions.map((q, qi) => {
+          const userAns = attempt.answers[qi];
+          const isQuestionCorrect = submitted && userAns === q.correct;
+          return (
+            <div
+              key={q.id || qi}
+              className={`bg-white border rounded-lg p-6 transition ${
+                !submitted ? "border-[#E5E5E5]" : isQuestionCorrect ? "border-green-400" : "border-red-400"
+              }`}
+            >
+              <div className="flex items-baseline gap-3 mb-5">
+                <div className={`text-sm font-bold tabular-nums ${
+                  !submitted ? "text-[#E66433]" : isQuestionCorrect ? "text-green-600" : "text-red-600"
+                }`}>Q{qi + 1}</div>
+                <div className="text-lg font-semibold text-[#1A1A1A] leading-snug flex-1">{q.q}</div>
+                {submitted && (
+                  isQuestionCorrect
+                    ? <CheckCircle2 className="w-6 h-6 text-green-600 flex-shrink-0" />
+                    : <XCircle className="w-6 h-6 text-red-600 flex-shrink-0" />
+                )}
+              </div>
+
+              <div className="space-y-2">
+                {q.options.map((opt, ai) => {
+                  const selected = userAns === ai;
+                  const isCorrectOption = ai === q.correct;
+                  let buttonClass, indicatorClass, indicatorContent, textClass;
+
+                  if (submitted) {
+                    if (isCorrectOption) {
+                      buttonClass = "bg-green-50 border-green-500";
+                      indicatorClass = "bg-green-500 border-green-500";
+                      indicatorContent = <CheckCircle2 className="w-3 h-3 text-white" />;
+                      textClass = "text-green-900 font-semibold";
+                    } else if (selected) {
+                      buttonClass = "bg-red-50 border-red-500";
+                      indicatorClass = "bg-red-500 border-red-500";
+                      indicatorContent = <XCircle className="w-3 h-3 text-white" />;
+                      textClass = "text-red-900 font-semibold";
+                    } else {
+                      buttonClass = "bg-white border-[#E5E5E5] opacity-60";
+                      indicatorClass = "border-[#767676]";
+                      indicatorContent = null;
+                      textClass = "text-[#4A4A4A]";
+                    }
+                  } else if (selected) {
+                    buttonClass = "bg-[#FDF1EC] border-[#E66433] ring-2 ring-[#E66433]/30";
+                    indicatorClass = "bg-[#E66433] border-[#E66433]";
+                    indicatorContent = <div className="w-2 h-2 rounded-full bg-white" />;
+                    textClass = "text-[#1A1A1A] font-semibold";
+                  } else {
+                    buttonClass = "bg-white border-[#E5E5E5] hover:border-[#FBE4D8] hover:bg-[#FDF1EC]/40";
+                    indicatorClass = "border-[#767676]";
+                    indicatorContent = null;
+                    textClass = "text-[#2A2A2A]";
+                  }
+
+                  return (
+                    <button
+                      key={ai}
+                      onClick={() => !submitted && onAnswer(qi, ai)}
+                      disabled={submitted}
+                      className={`w-full text-left px-4 py-3 rounded-md border transition flex items-start gap-3 ${buttonClass} ${submitted ? "cursor-default" : ""}`}
+                    >
+                      <div className={`w-5 h-5 rounded-full border-2 flex-shrink-0 mt-0.5 flex items-center justify-center ${indicatorClass}`}>
+                        {indicatorContent}
+                      </div>
+                      <span className={textClass}>{opt}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {submitted && (
+                <div className="mt-4 p-3 rounded-md bg-[#FAFAFA] border-l-4 border-[#E66433] text-sm text-[#4A4A4A]">
+                  <span className="font-semibold text-[#1A1A1A]">Why: </span>{q.why}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {!submitted ? (
+        <div className="mt-10 flex justify-end">
+          <button
+            onClick={onSubmit}
+            disabled={!canSubmit}
+            style={{
+              backgroundColor: "#E66433", color: "#FFFFFF", padding: "1rem 2rem", borderRadius: "0.5rem",
+              fontSize: "1rem", fontWeight: 700, display: "inline-flex", alignItems: "center", gap: "0.5rem",
+              border: "none", cursor: canSubmit ? "pointer" : "not-allowed", opacity: canSubmit ? 1 : 0.4,
+              boxShadow: "0 4px 12px rgba(230, 100, 51, 0.25)", transition: "all 0.15s ease"
+            }}
+          >
+            Submit Final Exam <ClipboardCheck className="w-5 h-5" />
+          </button>
+        </div>
+      ) : (
+        <div className="mt-10 flex flex-col sm:flex-row gap-3 justify-end">
+          <button
+            onClick={onRetake}
+            className="px-5 py-3 rounded-md border border-[#E5E5E5] text-[#4A4A4A] font-semibold hover:bg-[#FAFAFA] hover:border-[#E66433] hover:text-[#E66433] transition flex items-center justify-center gap-2"
+          >
+            <RefreshCw className="w-4 h-4" /> Retake exam
+          </button>
+          <button
+            onClick={onBack}
+            className="px-5 py-3 rounded-md border border-[#E5E5E5] text-[#4A4A4A] font-semibold hover:bg-[#FAFAFA] transition"
+          >
+            Back to dashboard
+          </button>
+          {showCertificate && (
+            <button
+              onClick={onViewCertificate}
+              style={{
+                backgroundColor: "#16A34A", color: "#FFFFFF", padding: "0.75rem 1.25rem", borderRadius: "0.375rem",
+                fontWeight: 700, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "0.5rem",
+                border: "none", cursor: "pointer", transition: "background-color 0.15s ease"
+              }}
+            >
+              <Trophy className="w-4 h-4" /> View certificate
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ===========================================================================
+// CERTIFICATE  (capstone shown after passing the final exam)
+// ===========================================================================
+
+function Certificate({ user, examState, onBack }) {
+  const name = user?.displayName || user?.email || "";
+  const bestPct = Math.round((examState?.bestScore || 0) * 100);
+  const dateStr = examState?.passedAt
+    ? new Date(examState.passedAt).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })
+    : "";
+
+  return (
+    <div className="max-w-3xl mx-auto px-6 py-10">
+      <div className="flex items-center justify-between mb-8">
+        <button onClick={onBack} className="text-sm text-[#4A4A4A] hover:text-[#E66433] flex items-center gap-1.5 transition">
+          <ArrowLeft className="w-4 h-4" /> Back to dashboard
+        </button>
+        <button
+          onClick={() => { if (typeof window !== "undefined") window.print(); }}
+          className="text-sm font-semibold text-[#4A4A4A] border border-[#E5E5E5] rounded-md px-3 py-1.5 hover:bg-[#FAFAFA] transition"
+        >
+          Print / Save PDF
+        </button>
+      </div>
+
+      <div className="rounded-lg border-4 border-[#E66433] bg-white p-10 md:p-14 text-center relative overflow-hidden">
+        <div className="absolute -top-24 -right-24 w-64 h-64 rounded-full bg-[#FDF1EC]" />
+        <div className="relative">
+          <img src={LOGO_SRC} alt="SmarTek21" className="h-10 w-auto mx-auto mb-6" />
+          <div className="text-xs uppercase tracking-[0.35em] text-[#E66433] font-bold mb-8">Certificate of Completion</div>
+
+          <div className="text-sm text-[#767676] mb-2">This certifies that</div>
+          <div className="text-4xl md:text-5xl font-bold text-[#1A1A1A] tracking-tight mb-6">{name}</div>
+          <div className="text-[#4A4A4A] leading-relaxed max-w-xl mx-auto mb-10">
+            has successfully completed the SmarTek21 Academy sales-training program and passed the comprehensive final exam covering all {COURSE.length} modules.
+          </div>
+
+          <div className="w-20 h-20 rounded-full bg-[#16A34A] flex items-center justify-center mx-auto mb-8">
+            <Trophy className="w-10 h-10 text-white" />
+          </div>
+
+          <div className="flex items-center justify-center gap-10 flex-wrap text-sm">
+            <div>
+              <div className="text-[#1A1A1A] font-bold tabular-nums text-lg">{bestPct}%</div>
+              <div className="text-[10px] uppercase tracking-[0.15em] text-[#767676] font-semibold">Best Score</div>
+            </div>
+            <div>
+              <div className="text-[#1A1A1A] font-bold text-lg">{dateStr}</div>
+              <div className="text-[10px] uppercase tracking-[0.15em] text-[#767676] font-semibold">Date Passed</div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
