@@ -34,9 +34,19 @@ const PROJECT_TAG = { Key: "Project", Values: ["smartek21-academy"] };
 // reject unknown ranges (400) without duplicating the list.
 export const RANGES = { mtd: "mtd", last30d: "last30d" };
 
+// Cache-buster for the shaped payload. Bump whenever fetchCosts's output changes
+// — shape OR computed values (e.g. rounding precision) — so previously cached
+// payloads are ignored instead of served stale. The cost cache key embeds it
+// (see getCachedCosts/putCachedCosts). "2" = the 6-decimal, unfiltered breakdown.
+export const CACHE_VERSION = "2";
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 const ymd = (d) => d.toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
-const cents = (n) => Math.round(n * 100) / 100;
+// Round to 6 decimal places (millionths of a dollar). Tagged project spend is
+// currently sub-cent — some services (CloudFront) cost millionths — so rounding
+// to whole cents floored them to $0.00. 6 dp lets every service that accrues
+// any cost render a non-zero figure. Larger figures are unaffected.
+const round6 = (n) => Math.round(n * 1e6) / 1e6;
 
 // Resolve a range to a CE TimePeriod. CE's End is EXCLUSIVE, so it is always
 // "tomorrow" (UTC) to include everything through today. Throws on an unknown
@@ -95,19 +105,17 @@ export async function fetchCosts(range, now = new Date()) {
     }
   }
 
+  // Every service the tag touches, largest first. No filtering: the user wants
+  // every piece of the app that accrues any cost shown — even fractions of a
+  // cent, and $0 free-tier services like Lambda — so nothing is dropped here.
   const byService = [...byServiceRaw.entries()]
-    .map(([service, amount]) => ({ service, amount: cents(amount) }))
-    .filter((s) => s.amount > 0)
+    .map(([service, amount]) => ({ service, amount: round6(amount) }))
     .sort((a, b) => b.amount - a.amount);
 
-  // Total from the RAW per-service amounts, rounding only once at the end.
-  // Rounding each service to a cent first and summing THOSE dropped every
-  // sub-cent service (each rounds to 0.00 and is filtered out), which zeroed the
-  // headline total for low-traffic months even when real spend existed. Summing
-  // raw first keeps a handful of sub-cent services adding up to a visible figure.
-  // (Consequence: the breakdown table — which omits services under $0.005 — may
-  // not sum exactly to this total. That's expected and correct.)
-  const total = cents(
+  // Total from the RAW per-service amounts, rounding only once at the end, so
+  // many tiny services still add up to an accurate figure instead of each
+  // rounding away first.
+  const total = round6(
     [...byServiceRaw.values()].reduce((sum, amount) => sum + amount, 0)
   );
 
@@ -117,7 +125,7 @@ export async function fetchCosts(range, now = new Date()) {
       if (metric?.Unit) currency = metric.Unit;
       return {
         date: period.TimePeriod?.Start,
-        amount: cents(Number(metric?.Amount || 0)),
+        amount: round6(Number(metric?.Amount || 0)),
       };
     })
     .filter((t) => t.date)

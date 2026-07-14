@@ -19,7 +19,7 @@
 
 import { verifyToken } from "./_lib/auth.js";
 import { getUser, getCachedCosts, putCachedCosts } from "./_lib/db.js";
-import { fetchCosts, RANGES } from "./_lib/costs.js";
+import { fetchCosts, RANGES, CACHE_VERSION } from "./_lib/costs.js";
 
 export default async function handler(req, res) {
   let user;
@@ -39,20 +39,27 @@ export default async function handler(req, res) {
     if (!RANGES[range]) {
       return res.status(400).json({ error: "invalid range" });
     }
+    // `?refresh=1` forces a fresh Cost Explorer fetch, skipping the cache read,
+    // for when an admin wants the current numbers immediately. The fresh result
+    // still overwrites the cache below, so later views stay fast.
+    const forceRefresh = req.query?.refresh === "1" || req.query?.refresh === "true";
 
     // Read-through cache: a hit avoids the metered, slow CE call entirely. A
     // cache read failure is non-fatal — fall through and fetch fresh.
     let cached = null;
-    try {
-      cached = await getCachedCosts(range);
-    } catch (err) {
-      console.error("admin-costs cache read failed:", err);
+    if (!forceRefresh) {
+      try {
+        cached = await getCachedCosts(range, CACHE_VERSION);
+      } catch (err) {
+        console.error("admin-costs cache read failed:", err);
+      }
     }
     if (cached) {
       return res.status(200).json({ ...cached, cached: true });
     }
 
-    // Cache miss: fetch from Cost Explorer. Fail SOFT on any CE/SDK error.
+    // Cache miss (or forced refresh): fetch from Cost Explorer. Fail SOFT on any
+    // CE/SDK error.
     let payload;
     try {
       payload = await fetchCosts(range);
@@ -63,7 +70,7 @@ export default async function handler(req, res) {
 
     // Best-effort cache write — a failure here must not fail the request.
     try {
-      await putCachedCosts(range, payload);
+      await putCachedCosts(range, CACHE_VERSION, payload);
     } catch (err) {
       console.error("admin-costs cache write failed:", err);
     }

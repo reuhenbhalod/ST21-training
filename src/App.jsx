@@ -1644,33 +1644,41 @@ function AdminCosts({ apiCall }) {
   const [range, setRange] = useState("mtd"); // mtd | last30d
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null); // { unavailable, message } | null
+  // Ignore responses from superseded loads (fast range toggles / refreshes) so a
+  // slow earlier fetch can't overwrite a newer one.
+  const reqId = useRef(0);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const result = await apiCall(`/api/admin-costs?range=${range}`);
-        if (!cancelled) setData(result);
-      } catch (err) {
-        console.error("admin-costs fetch failed:", err);
-        if (!cancelled) {
-          const unavailable = err.status === 503 || err.body?.error === "cost_data_unavailable";
-          setError(unavailable
-            ? { unavailable: true, message: "Cost data is temporarily unavailable. Please try again shortly." }
-            : { unavailable: false, message: err.message || "Failed to load costs" });
-          setData(null);
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
+  // Shared loader. force=true appends ?refresh=1 so the API skips its cache and
+  // pulls current numbers straight from Cost Explorer.
+  const loadCosts = useCallback(async ({ force = false } = {}) => {
+    const myId = ++reqId.current;
+    if (force) setRefreshing(true); else setLoading(true);
+    setError(null);
+    try {
+      const result = await apiCall(`/api/admin-costs?range=${range}${force ? "&refresh=1" : ""}`);
+      if (myId === reqId.current) setData(result);
+    } catch (err) {
+      console.error("admin-costs fetch failed:", err);
+      if (myId === reqId.current) {
+        const unavailable = err.status === 503 || err.body?.error === "cost_data_unavailable";
+        setError(unavailable
+          ? { unavailable: true, message: "Cost data is temporarily unavailable. Please try again shortly." }
+          : { unavailable: false, message: err.message || "Failed to load costs" });
+        setData(null);
       }
-    })();
-    return () => { cancelled = true; };
+    } finally {
+      if (myId === reqId.current) { setLoading(false); setRefreshing(false); }
+    }
   }, [apiCall, range]);
 
-  const fmt = (n) => `$${(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  useEffect(() => { loadCosts(); }, [loadCosts]);
+
+  // Show up to 6 decimal places so every service — down to fractions of a cent
+  // (e.g. CloudFront at $0.000004) — renders a real figure instead of $0.00.
+  // Larger figures still render normally (2 dp).
+  const fmt = (n) => `$${(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`;
   const rangeLabel = range === "mtd" ? "month to date" : "last 30 days";
   const isEmpty = data && data.total === 0 && (data.byService?.length || 0) === 0;
   const trendMax = data?.trend?.length ? Math.max(...data.trend.map((t) => t.amount), 0) : 0;
@@ -1684,25 +1692,34 @@ function AdminCosts({ apiCall }) {
         </div>
         <h1 className="text-4xl font-bold text-[#1A1A1A] mb-2 tracking-tight">Hosting costs</h1>
         <p className="text-[#4A4A4A]">
-          AWS spend for the ST21 Academy (resources tagged{" "}
-          <span style={{ fontFamily: "monospace", fontSize: "0.85em", backgroundColor: "#F3F3F3", padding: "0.05rem 0.3rem", borderRadius: "3px" }}>Project=smartek21-academy</span>).
           Figures come from AWS Cost Explorer and refresh a few times a day.
         </p>
       </div>
 
-      <div className="inline-flex rounded-lg border border-[#E5E5E5] overflow-hidden mb-8">
-        {[{ id: "mtd", label: "Month to date" }, { id: "last30d", label: "Last 30 days" }].map((r) => {
-          const active = range === r.id;
-          return (
-            <button
-              key={r.id}
-              onClick={() => setRange(r.id)}
-              style={{ padding: "0.4rem 1rem", fontSize: "0.8rem", fontWeight: 600, border: "none", cursor: "pointer", backgroundColor: active ? "#FDF1EC" : "#FFFFFF", color: active ? "#E66433" : "#4A4A4A" }}
-            >
-              {r.label}
-            </button>
-          );
-        })}
+      <div className="flex items-center justify-between gap-4 flex-wrap mb-8">
+        <div className="inline-flex rounded-lg border border-[#E5E5E5] overflow-hidden">
+          {[{ id: "mtd", label: "Month to date" }, { id: "last30d", label: "Last 30 days" }].map((r) => {
+            const active = range === r.id;
+            return (
+              <button
+                key={r.id}
+                onClick={() => setRange(r.id)}
+                style={{ padding: "0.4rem 1rem", fontSize: "0.8rem", fontWeight: 600, border: "none", cursor: "pointer", backgroundColor: active ? "#FDF1EC" : "#FFFFFF", color: active ? "#E66433" : "#4A4A4A" }}
+              >
+                {r.label}
+              </button>
+            );
+          })}
+        </div>
+        <button
+          onClick={() => loadCosts({ force: true })}
+          disabled={loading || refreshing}
+          className="inline-flex items-center gap-2 rounded-lg border border-[#E5E5E5] bg-white px-3 py-2 text-xs font-semibold text-[#4A4A4A] hover:bg-[#FAFAFA] disabled:opacity-50 disabled:cursor-not-allowed"
+          title="Fetch the latest numbers from AWS Cost Explorer now, bypassing the cache"
+        >
+          <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} />
+          {refreshing ? "Refreshing…" : "Refresh"}
+        </button>
       </div>
 
       {loading && <div className="text-center py-16 text-[#4A4A4A]">Loading costs…</div>}

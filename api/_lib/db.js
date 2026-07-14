@@ -279,11 +279,14 @@ const COST_CACHE_PK = "SYSTEM#costs";
 const COST_PREFIX = "COST#";
 
 // Read the cached payload for a range, or null on a miss (absent or expired).
-export async function getCachedCosts(range) {
+// `version` is embedded in the SK so bumping the shaping logic (CACHE_VERSION in
+// costs.js) makes old payloads unreadable — they never match and TTL-expire —
+// instead of being served stale.
+export async function getCachedCosts(range, version) {
   const { Item } = await doc().send(
     new GetCommand({
       TableName: TABLE,
-      Key: { PK: COST_CACHE_PK, SK: `${COST_PREFIX}${range}` },
+      Key: { PK: COST_CACHE_PK, SK: `${COST_PREFIX}${version}#${range}` },
     })
   );
   if (!Item) return null;
@@ -292,15 +295,16 @@ export async function getCachedCosts(range) {
   return Item.payload || null;
 }
 
-// Cache a shaped payload for a range with a TTL (default 6h). expires_at is a
-// numeric epoch-seconds value, matching the table's TTL attribute convention.
-export async function putCachedCosts(range, payload, ttlSeconds = 6 * 3600) {
+// Cache a shaped payload for a (version, range) with a TTL (default 6h).
+// expires_at is a numeric epoch-seconds value, matching the table's TTL
+// attribute convention.
+export async function putCachedCosts(range, version, payload, ttlSeconds = 6 * 3600) {
   await doc().send(
     new PutCommand({
       TableName: TABLE,
       Item: {
         PK: COST_CACHE_PK,
-        SK: `${COST_PREFIX}${range}`,
+        SK: `${COST_PREFIX}${version}#${range}`,
         payload,
         expires_at: Math.floor(Date.now() / 1000) + ttlSeconds,
       },
