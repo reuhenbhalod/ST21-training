@@ -1641,7 +1641,7 @@ function AdminTabs({ tab, onTab }) {
 // (cost_data_unavailable) degrades to a clear message rather than a raw error;
 // an all-$0 result is a valid state (tags apply going forward, ~24h lag).
 function AdminCosts({ apiCall }) {
-  const [range, setRange] = useState("mtd"); // mtd | last30d
+  const range = "mtd"; // only month-to-date is offered now
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -1679,7 +1679,7 @@ function AdminCosts({ apiCall }) {
   // (e.g. CloudFront at $0.000004) — renders a real figure instead of $0.00.
   // Larger figures still render normally (2 dp).
   const fmt = (n) => `$${(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`;
-  const rangeLabel = range === "mtd" ? "month to date" : "last 30 days";
+  const rangeLabel = "month to date";
   const isEmpty = data && data.total === 0 && (data.byService?.length || 0) === 0;
   const trendMax = data?.trend?.length ? Math.max(...data.trend.map((t) => t.amount), 0) : 0;
 
@@ -1696,21 +1696,7 @@ function AdminCosts({ apiCall }) {
         </p>
       </div>
 
-      <div className="flex items-center justify-between gap-4 flex-wrap mb-8">
-        <div className="inline-flex rounded-lg border border-[#E5E5E5] overflow-hidden">
-          {[{ id: "mtd", label: "Month to date" }, { id: "last30d", label: "Last 30 days" }].map((r) => {
-            const active = range === r.id;
-            return (
-              <button
-                key={r.id}
-                onClick={() => setRange(r.id)}
-                style={{ padding: "0.4rem 1rem", fontSize: "0.8rem", fontWeight: 600, border: "none", cursor: "pointer", backgroundColor: active ? "#FDF1EC" : "#FFFFFF", color: active ? "#E66433" : "#4A4A4A" }}
-              >
-                {r.label}
-              </button>
-            );
-          })}
-        </div>
+      <div className="flex items-center justify-end mb-8">
         <button
           onClick={() => loadCosts({ force: true })}
           disabled={loading || refreshing}
@@ -1769,12 +1755,17 @@ function AdminCosts({ apiCall }) {
 
           {data.trend?.length > 0 && (
             <div className="bg-white border border-[#E5E5E5] rounded-lg p-6">
-              <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.1em", color: "#767676", fontWeight: 600, marginBottom: "1rem" }}>Daily trend</div>
+              <div style={{ fontSize: "0.7rem", textTransform: "uppercase", letterSpacing: "0.1em", color: "#767676", fontWeight: 600, marginBottom: "1rem" }}>Daily trend · last 14 days</div>
               <div className="flex items-end gap-1" style={{ height: "120px" }}>
                 {data.trend.map((t) => {
                   const h = trendMax > 0 ? Math.max(2, (t.amount / trendMax) * 100) : 2;
                   return (
-                    <div key={t.date} title={`${t.date}: ${fmt(t.amount)}`} style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "flex-end", height: "100%" }}>
+                    <div key={t.date} className="group relative" style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "flex-end", height: "100%" }}>
+                      {/* Hover tooltip: just that day's total (6-dp via fmt), with the date as context. */}
+                      <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1 hidden group-hover:block whitespace-nowrap rounded bg-[#1A1A1A] px-2 py-1 text-white z-10" style={{ fontSize: "0.65rem" }}>
+                        <div className="font-semibold tabular-nums">{fmt(t.amount)}</div>
+                        <div className="text-white/60" style={{ fontSize: "0.6rem" }}>{t.date}</div>
+                      </div>
                       <div style={{ height: `${h}%`, backgroundColor: "#E66433", borderRadius: "2px 2px 0 0", minHeight: "2px" }} />
                     </div>
                   );

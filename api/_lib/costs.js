@@ -37,11 +37,13 @@ export const RANGES = { mtd: "mtd", last30d: "last30d" };
 // Cache-buster for the shaped payload. Bump whenever fetchCosts's output changes
 // — shape OR computed values (e.g. rounding precision) — so previously cached
 // payloads are ignored instead of served stale. The cost cache key embeds it
-// (see getCachedCosts/putCachedCosts). "2" = the 6-decimal, unfiltered breakdown.
-export const CACHE_VERSION = "2";
+// (see getCachedCosts/putCachedCosts). "3" = 6-decimal unfiltered breakdown +
+// rolling 14-day daily trend.
+export const CACHE_VERSION = "3";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const ymd = (d) => d.toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+const TREND_DAYS = 14; // rolling daily-trend window: today + the preceding 13 days
 // Round to 6 decimal places (millionths of a dollar). Tagged project spend is
 // currently sub-cent — some services (CloudFront) cost millionths — so rounding
 // to whole cents floored them to $0.00. 6 dp lets every service that accrues
@@ -71,26 +73,35 @@ export function resolveRange(range, now = new Date()) {
 // is a valid all-zero payload, NOT an error.
 export async function fetchCosts(range, now = new Date()) {
   const { start, end } = resolveRange(range, now);
-  const TimePeriod = { Start: start, End: end };
-  const base = {
-    TimePeriod,
+  const common = {
     Metrics: ["UnblendedCost"],
     Filter: { Tags: PROJECT_TAG },
   };
 
-  // 1. Per-service breakdown. MONTHLY may return one period (mtd) or two
-  //    (last30d crossing a month boundary), so we aggregate across all periods.
+  // 1. Per-service breakdown + total, over the requested range (month-to-date).
+  //    MONTHLY may return one period (mtd) or two (a range crossing a month
+  //    boundary), so we aggregate across all periods below.
   const breakdown = await ce().send(
     new GetCostAndUsageCommand({
-      ...base,
+      ...common,
+      TimePeriod: { Start: start, End: end },
       Granularity: "MONTHLY",
       GroupBy: [{ Type: "DIMENSION", Key: "SERVICE" }],
     })
   );
 
-  // 2. Daily trend. No GroupBy — the amount lives in each period's Total.
+  // 2. Daily trend over a FIXED trailing window (last TREND_DAYS days incl.
+  //    today), deliberately independent of the range above so the chart is
+  //    always a rolling ~2 weeks regardless of where we are in the month. No
+  //    GroupBy — the amount lives in each period's Total.
+  const trendStart = ymd(new Date(now.getTime() - (TREND_DAYS - 1) * DAY_MS));
+  const trendEnd = ymd(new Date(now.getTime() + DAY_MS)); // exclusive upper bound
   const daily = await ce().send(
-    new GetCostAndUsageCommand({ ...base, Granularity: "DAILY" })
+    new GetCostAndUsageCommand({
+      ...common,
+      TimePeriod: { Start: trendStart, End: trendEnd },
+      Granularity: "DAILY",
+    })
   );
 
   let currency = "USD";
