@@ -48,14 +48,14 @@ const LOGO_SRC = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1B
 // sign-in for real MSAL redirect flow.
 // ---------------------------------------------------------------------------
 const MSAL_CONFIG = {
-  clientId: "9c7894fe-fab8-40ac-a866-81d06f14f68c",
+  clientId: "7d8b1e2d-57fb-430b-b3c0-acaab113bbf5",
   tenantId: "4738192e-2424-46c8-a19c-bc2c86665215",
   domain: "smartek21.com"
 };
 
 // Scopes we ask Microsoft for. User.Read is the basic profile permission.
 // We use the resulting access token to call our own API endpoints.
-const MSAL_SCOPES = ["api://9c7894fe-fab8-40ac-a866-81d06f14f68c/access_as_user"];
+const MSAL_SCOPES = ["api://7d8b1e2d-57fb-430b-b3c0-acaab113bbf5/access_as_user"];
 
 // Base URL for API calls. Empty string means "same origin" — works in
 // Azure Static Web Apps where the API lives at /api on the same domain.

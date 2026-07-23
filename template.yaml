@@ -2,8 +2,13 @@ AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
   SmarTek21 Academy — static React site on S3 + CloudFront, API on a single
-  Lambda (Function URL), data in DynamoDB on-demand. Entra ID auth is unchanged
-  (verified in-Lambda against Microsoft's public keys). Designed for ~$0/month.
+  Lambda (Function URL), data in DynamoDB on-demand. Microsoft Entra ID auth is
+  verified in-Lambda against Microsoft's public keys (api/_lib/auth.js).
+  Designed for ~$0/month.
+  NOTE: the running deployment in the current account ships the Lambda + site
+  directly (aws lambda update-function-code / s3 sync), not via this template,
+  because the deploy user lacks iam:PassRole. This template is kept as the
+  source-of-truth reference for the infra and for future clean redeploys.
 
 Parameters:
   AllowedOrigin:
@@ -112,6 +117,61 @@ Resources:
   # code (topic-classifier pre-check + system-prompt grounding), so no Bedrock
   # Guardrail resource is needed. Timeout is bumped for the two Bedrock calls.
   # ---------------------------------------------------------------------------
+  # Execution role defined EXPLICITLY (rather than via SAM's `Policies:`
+  # shorthand, which auto-generates and tags a role) so deploying does not
+  # require iam:TagRole. Roles are not billable, so omitting the Project tag
+  # here does not affect cost attribution — the billable resources keep theirs.
+  # The inline policy mirrors exactly what the former Policies: block granted.
+  ApiFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ApiFunctionInline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # DynamoDBCrudPolicy equivalent — table + its indexes.
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:ConditionCheckItem
+                  - dynamodb:DescribeTable
+                Resource:
+                  - !GetAtt Table.Arn
+                  - !Sub "${Table.Arn}/index/*"
+              # Invoking through the application inference profile needs
+              # InvokeModel on BOTH the profile ARN and the model(s) it routes
+              # to (all regions the cross-region system profile spans).
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource:
+                  - !GetAtt NovaLiteInferenceProfile.InferenceProfileArn
+                  - !Sub "arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0"
+                  - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*amazon.nova-lite-v1:0"
+              # Cost Explorer for the admin cost dashboard (/api/admin-costs). CE
+              # has no resource-level scoping, so Resource must be "*". Read-only.
+              - Effect: Allow
+                Action:
+                  - ce:GetCostAndUsage
+                  - ce:GetCostForecast
+                  - ce:GetDimensionValues
+                Resource: "*"
+
   ApiFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -119,6 +179,7 @@ Resources:
       CodeUri: api/
       Handler: lambda.handler
       Timeout: 30
+      Role: !GetAtt ApiFunctionRole.Arn
       Environment:
         Variables:
           TABLE_NAME: !Ref Table
@@ -129,28 +190,6 @@ Resources:
           BEDROCK_MODEL_ID: !GetAtt NovaLiteInferenceProfile.InferenceProfileArn
           CHAT_RATE_LIMIT_PER_MINUTE: !Ref ChatRateLimitPerMinute
           CHAT_RATE_LIMIT_PER_DAY: !Ref ChatRateLimitPerDay
-      Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref Table
-        - Statement:
-            - Effect: Allow
-              Action: bedrock:InvokeModel
-              Resource:
-                # Invoking through the application inference profile needs
-                # InvokeModel on BOTH the profile ARN and the model(s) it routes
-                # to (all regions the cross-region system profile spans).
-                - !GetAtt NovaLiteInferenceProfile.InferenceProfileArn
-                - !Sub "arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0"
-                - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*amazon.nova-lite-v1:0"
-        # Cost Explorer for the admin cost dashboard (/api/admin-costs). CE has
-        # no resource-level scoping, so Resource must be "*". Read-only actions.
-        - Statement:
-            - Effect: Allow
-              Action:
-                - ce:GetCostAndUsage
-                - ce:GetCostForecast
-                - ce:GetDimensionValues
-              Resource: "*"
       FunctionUrlConfig:
         AuthType: NONE
         Cors:

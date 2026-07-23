@@ -5,7 +5,7 @@
 import { jwtVerify, createRemoteJWKSet } from "jose";
 
 const TENANT_ID = "4738192e-2424-46c8-a19c-bc2c86665215";
-const CLIENT_ID = "9c7894fe-fab8-40ac-a866-81d06f14f68c";
+const CLIENT_ID = "7d8b1e2d-57fb-430b-b3c0-acaab113bbf5";
 const ALLOWED_DOMAIN = "smartek21.com";
 
 const JWKS = createRemoteJWKSet(
