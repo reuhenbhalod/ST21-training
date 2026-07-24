@@ -6,7 +6,9 @@ import { jwtVerify, createRemoteJWKSet } from "jose";
 
 const TENANT_ID = "4738192e-2424-46c8-a19c-bc2c86665215";
 const CLIENT_ID = "7d8b1e2d-57fb-430b-b3c0-acaab113bbf5";
-const ALLOWED_DOMAIN = "smartek21.com";
+// Email domains allowed to sign in. All must be verified custom domains on the
+// same Entra tenant (TENANT_ID) so their users get tokens from this app.
+const ALLOWED_DOMAINS = ["smartek21.com", "retrorabbit.co.za"];
 
 const JWKS = createRemoteJWKSet(
   new URL(`https://login.microsoftonline.com/${TENANT_ID}/discovery/keys`)
@@ -38,15 +40,29 @@ export async function verifyToken(req) {
   // the same user keyed to the same row regardless of which token version we get.
   // `email` is checked LAST because it can be a different primary-SMTP alias and
   // would otherwise split one user's progress across two keys.
-  const email = (
-    payload.preferred_username ||
-    payload.upn ||
-    payload.email ||
-    ""
-  ).toLowerCase().trim();
+  // Candidate identity claims in priority order. For member accounts these all
+  // resolve to the same UPN, so the order keeps one user keyed to one row across
+  // v1.0/v2.0 tokens. For B2B guests, however, `preferred_username`/`upn` can be
+  // the mangled "name_domain#EXT#@tenant.onmicrosoft.com" form while `email`
+  // holds the real external address — so we prefer whichever candidate sits on
+  // an allowed domain, and only fall back to raw priority order otherwise.
+  const candidates = [
+    payload.preferred_username,
+    payload.upn,
+    payload.email,
+  ]
+    .filter(Boolean)
+    .map((c) => c.toLowerCase().trim());
 
-  if (!email.endsWith(`@${ALLOWED_DOMAIN}`)) {
-    throw new Error(`User ${email} is not from the ${ALLOWED_DOMAIN} domain`);
+  const email =
+    candidates.find((c) => ALLOWED_DOMAINS.some((d) => c.endsWith(`@${d}`))) ||
+    candidates[0] ||
+    "";
+
+  if (!ALLOWED_DOMAINS.some((d) => email.endsWith(`@${d}`))) {
+    throw new Error(
+      `User ${email} is not from an allowed domain (${ALLOWED_DOMAINS.join(", ")})`
+    );
   }
 
   const prefix = email.split("@")[0];

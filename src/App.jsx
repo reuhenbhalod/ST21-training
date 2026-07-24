@@ -50,7 +50,9 @@ const LOGO_SRC = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1B
 const MSAL_CONFIG = {
   clientId: "7d8b1e2d-57fb-430b-b3c0-acaab113bbf5",
   tenantId: "4738192e-2424-46c8-a19c-bc2c86665215",
-  domain: "smartek21.com"
+  // Email domains allowed to sign in. Each must be a verified custom domain on
+  // the tenant above so its users authenticate through this app registration.
+  domains: ["smartek21.com", "retrorabbit.co.za"]
 };
 
 // Scopes we ask Microsoft for. User.Read is the basic profile permission.
@@ -457,8 +459,9 @@ export default function SmarTek21Academy() {
   // account rather than authing them.
   function finishLogin(rawEmail, token) {
     const email = (rawEmail || "").trim().toLowerCase();
-    if (!email.endsWith(`@${MSAL_CONFIG.domain}`)) {
-      setLoginError(`Use your @${MSAL_CONFIG.domain} Microsoft work account to sign in.`);
+    if (!MSAL_CONFIG.domains.some((d) => email.endsWith(`@${d}`))) {
+      const domainList = MSAL_CONFIG.domains.map((d) => `@${d}`).join(" or ");
+      setLoginError(`Use your ${domainList} Microsoft work account to sign in.`);
       setAuthState("login");
       return false;
     }
